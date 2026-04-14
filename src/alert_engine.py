@@ -220,41 +220,68 @@ async def send_startup_message():
 
 
 async def send_portfolio_summary():
-    """Envia un resumen del portafolio Shadow Tracker a Telegram."""
+    """Envia un resumen detallado del portafolio al estilo report_portfolio.py a Telegram."""
     pnl_path = "artifacts/copy_trade_pnl.json"
     try:
         if not os.path.exists(pnl_path):
+            msg = "Sin posiciones registradas todavía."
+            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+            async with aiohttp.ClientSession() as session:
+                await session.post(TELEGRAM_API, json=payload)
             return
+            
         with open(pnl_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
+        if not data:
+            return
+
         abiertas       = [p for p in data if p.get("status") == "open"]
         cerradas       = [p for p in data if p.get("status") == "closed"]
+        fallidas       = [p for p in data if p.get("status") == "failed"]
+        
         capital_total  = sum(p.get("copy_trade_usdc", 0) for p in data)
-        capital_vivo   = sum(p.get("copy_trade_usdc", 0) for p in abiertas)
+        capital_abierto= sum(p.get("copy_trade_usdc", 0) for p in abiertas)
         pnl_realizado  = sum(p.get("pnl_usdc", 0) or 0 for p in cerradas)
-        mode_tag       = "DRY RUN" if DRY_RUN else "LIVE"
+        mode_tag       = "DRY RUN 🟡" if DRY_RUN else "LIVE 🟢"
 
         pnl_emoji = "+" if pnl_realizado >= 0 else ""
+        
         msg = (
-            f"*SHADOW TRACKER — Resumen de Portafolio*\n"
-            f"_Informe automatico cada 100 apuestas interceptadas_\n"
+            f"📊 *REPORTE SHADOW TRACKER* ({mode_tag})\n"
             f"─────────────────────\n"
-            f"Apuestas abiertas: `{len(abiertas)}`\n"
-            f"Apuestas cerradas: `{len(cerradas)}`\n"
-            f"Capital total usado: `${capital_total:.2f} USDC`\n"
-            f"Capital en juego: `${capital_vivo:.2f} USDC`\n"
-            f"P/L realizado: `${pnl_emoji}{pnl_realizado:.2f} USDC`\n"
+            f"📉 *Total trades*        : `{len(data)}`\n"
+            f"🔓 *Posiciones abiertas* : `{len(abiertas)}`\n"
+            f"🔒 *Posiciones cerradas* : `{len(cerradas)}`\n"
+            f"❌ *Fallidas*            : `{len(fallidas)}`\n"
             f"─────────────────────\n"
-            f"_{mode_tag}_"
+            f"💸 *Capital total usado* : `${capital_total:.2f} USDC`\n"
+            f"⏳ *Capital en juego*    : `${capital_abierto:.2f} USDC`\n"
+            f"💰 *P/L realizado*       : `${pnl_emoji}{pnl_realizado:.2f} USDC`\n"
+            f"─────────────────────\n"
         )
+        
+        # Add list of open positions like report_portfolio.py
+        if abiertas:
+            msg += "\n📂 *POSICIONES ABIERTAS:*\n"
+            for p in abiertas[:25]: # Limit to 25 to avoid Telegram length limit
+                name = p.get('market_name', 'N/A')[:25]
+                outcome = p.get('outcome', 'N/A')[:8]
+                cap = p.get('copy_trade_usdc', 0)
+                price = p.get('entry_price', 0)
+                msg += f"• `{name}` | {outcome} | `${cap:.2f} @ {price:.3f}`\n"
+                
+            if len(abiertas) > 25:
+                msg += f"\n_... y {len(abiertas) - 25} más._\n"
+
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
         async with aiohttp.ClientSession() as session:
             async with session.post(TELEGRAM_API, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     logger.info("Resumen de portafolio enviado a Telegram.")
                 else:
-                    logger.error(f"Error enviando resumen: {resp.status}")
+                    body = await resp.text()
+                    logger.error(f"Error enviando resumen: {resp.status} - {body}")
     except Exception as e:
         logger.error(f"Error en send_portfolio_summary: {e}")
 
