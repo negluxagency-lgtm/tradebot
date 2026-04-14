@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Antigravity | Mission Control</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body class="dark-theme">
+    <div class="stars-container"></div>
+    
+    <header class="main-header">
+        <div class="brand">
+            <div class="logo-orb"></div>
+            <h1>ANTIGRAVITY <span>MISSION CONTROL</span></h1>
+        </div>
+        <div class="status-panel">
+            <div id="connection-status" class="status-item pulsing">
+                <span class="dot"></span>
+                <span class="label">LIVE TELEMETRY</span>
+            </div>
+            <div class="session-timer">
+                <span id="last-update">WAITING DATA...</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="dashboard-grid">
+        <!-- Dashboard Left: Metrics -->
+        <section class="metrics-sidebar">
+            <div class="card glass kpi-card">
+                <div class="kpi-label">TOTAL P&L</div>
+                <div class="kpi-value positive" id="total-pnl">$0.00</div>
+                <div class="kpi-sub" id="pnl-pct">+0.00%</div>
+            </div>
+
+            <div class="card glass kpi-card">
+                <div class="kpi-label">WIN RATE</div>
+                <div class="kpi-value" id="win-rate">0%</div>
+                <div class="progress-bar">
+                    <div class="fill" id="win-rate-fill" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <div class="card glass kpi-card">
+                <div class="kpi-label">ACTIVE TRADES</div>
+                <div class="kpi-value" id="active-trades">0</div>
+            </div>
+
+            <div class="card glass kpi-card primary">
+                <div class="kpi-label">OPERATIVE CAPITAL</div>
+                <div class="kpi-value">$1,750</div>
+                <div class="kpi-sub">USDC @ POLYGON</div>
+            </div>
+        </section>
+
+        <!-- Dashboard Center: Main Chart -->
+        <section class="main-content">
+            <div class="card glass chart-container">
+                <div class="card-header">
+                    <h2>EQUITY CURVE <span>(RETROSPECTIVE + LIVE)</span></h2>
+                </div>
+                <canvas id="equityChart"></canvas>
+            </div>
+
+            <!-- Trade History -->
+            <div class="card glass log-container">
+                <div class="card-header">
+                    <h2>MISSION LOG <span>(RECORDS)</span></h2>
+                </div>
+                <div class="table-wrapper">
+                    <table id="trades-table">
+                        <thead>
+                            <tr>
+                                <th>TIME</th>
+                                <th>SIDE</th>
+                                <th>ENTRY</th>
+                                <th>EXIT</th>
+                                <th>RESULT</th>
+                                <th>PnL (%)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trades-body">
+                            <!-- Injected by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
