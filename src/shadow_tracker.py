@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from copy_trader import run_copy_trader
-from alert_engine import dispatch_alert, send_portfolio_summary
+from alert_engine import dispatch_alert, send_portfolio_summary, telegram_listener_loop
 
 load_dotenv(".env.local")
 
@@ -178,6 +178,7 @@ async def main():
     await asyncio.gather(
         shadow_poller(signal_queue),
         run_copy_trader(signal_queue),
+        telegram_listener_loop(),
     )
 
 if __name__ == "__main__":

@@ -257,3 +257,40 @@ async def send_portfolio_summary():
                     logger.error(f"Error enviando resumen: {resp.status}")
     except Exception as e:
         logger.error(f"Error en send_portfolio_summary: {e}")
+
+async def telegram_listener_loop():
+    """Escucha mensajes de Telegram usando HTTP long polling de forma asíncrona.
+    Permite interactuar con el bot y pedirle un reporte escribiendo cualquier mensaje."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("Faltan credenciales de Telegram. Listener offline.")
+        return
+        
+    offset = None
+    logger.info("📡 Telegram Listener Activo. Escribe cualquier cosa al bot para recibir el reporte.")
+    
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+            params = {"timeout": 30}
+            if offset:
+                params["offset"] = offset
+                
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=40)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for result in data.get("result", []):
+                            offset = result["update_id"] + 1
+                            message = result.get("message")
+                            
+                            if message and "text" in message:
+                                chat_id = str(message.get("chat", {}).get("id"))
+                                # Seguridad: Solo procesar respuestas para el dueño del bot (nuestro chat_id)
+                                if chat_id == TELEGRAM_CHAT_ID:
+                                    logger.info("📨 Comando recibido en Telegram. Enviando el reporte de portafolio...")
+                                    await send_portfolio_summary()
+        except Exception as e:
+            # Ignorar errores menores de conexión por timeout
+            logger.debug(f"Error en telegram listener polling: {e}")
+            
+        await asyncio.sleep(2)
