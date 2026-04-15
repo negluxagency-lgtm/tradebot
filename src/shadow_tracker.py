@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from copy_trader import run_copy_trader
-from alert_engine import dispatch_alert, send_portfolio_summary, telegram_listener_loop
+from alert_engine import dispatch_alert, send_portfolio_summary, telegram_listener_loop, send_startup_message
 
 load_dotenv(".env.local")
 
