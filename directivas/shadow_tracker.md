@@ -1,7 +1,7 @@
 # 📜 Directiva: Módulo de Replicación de Perfiles (Shadow Tracker) - Antigravity
 
 ## 🚀 Misión
-Implementar un sistema de "espejo" (Mirror Trading) de alta fidelidad que rastree cada operación (Compra/Venta) de una dirección específica en Polymarket y ejecute órdenes idénticas de forma automática.
+Implementar un sistema de "espejo" (Mirror Trading) de alta fidelidad que rastree cada operación (Compra/Venta) de un **Bot Táctico de Micro-Compras** en Polymarket y ejecute órdenes idénticas de forma automática con un sistema de mitigación de riesgo dinámico (Protocolo 1%).
 
 ## 🛠️ Herramientas y SDKs
 - SDK: `antigravity`
@@ -32,3 +32,4 @@ Implementar un sistema de "espejo" (Mirror Trading) de alta fidelidad que rastre
 | Fecha | Error Detectado | Solución Aplicada |
 |-------|----------------|-------------------|
 | 2026-04-14 | Inicialización de Directiva | N/A |
+| 2026-04-16 | Drawdown de -$500 con ratio 10% | Reducción drástica del ratio a 1% (`SHADOW_COPY_RATIO=0.01`) y pivot a "Bots Tácticos" de coste cero para protección orbital del bankroll. |
