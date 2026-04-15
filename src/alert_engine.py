@@ -13,13 +13,16 @@ from dotenv import load_dotenv
 load_dotenv(".env.local")
 
 # ── Configuración ──────────────────────────────────────────────────────────────
+# Dejamos estos para compatibilidad con otros módulos, pero usaremos parámetros dinámicos cuando sea posible.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 SUPABASE_URL       = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 SUPABASE_KEY       = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
 
-TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+def get_telegram_api(token: str = None) -> str:
+    token = token or TELEGRAM_BOT_TOKEN
+    return f"https://api.telegram.org/bot{token}/sendMessage"
 
 logger = logging.getLogger("alert_engine")
 
@@ -73,22 +76,26 @@ def _format_telegram_message(signal: dict) -> str:
 
 
 # ── Envío a Telegram ───────────────────────────────────────────────────────────
-async def send_telegram_alert(signal: dict) -> bool:
+async def send_telegram_alert(signal: dict, bot_token: str = None, chat_id: str = None) -> bool:
     """Envía alerta formateada al chat de Telegram."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    token = bot_token or TELEGRAM_BOT_TOKEN
+    cid   = chat_id or TELEGRAM_CHAT_ID
+    
+    if not token or not cid:
         logger.warning("Telegram no configurado. Omitiendo alerta.")
         return False
 
     message = _format_telegram_message(signal)
     payload = {
-        "chat_id":    TELEGRAM_CHAT_ID,
+        "chat_id":    cid,
         "text":       message,
         "parse_mode": "Markdown",
     }
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(TELEGRAM_API, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            url = get_telegram_api(token)
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     logger.info(f"✅ Alerta Telegram enviada: {signal.get('market_name')}")
                     return True
@@ -171,14 +178,14 @@ def persist_signal_local(signal: dict, filepath: str = "artifacts/whale_signals.
 
 
 # ── Dispatcher principal ───────────────────────────────────────────────────────
-async def dispatch_alert(signal: dict):
+async def dispatch_alert(signal: dict, bot_token: str = None, chat_id: str = None):
     """Punto de entrada. Dispara todas las acciones de alerta en paralelo."""
     signal.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
 
     # shadow_mirror: no tiene SQS ni impact_score → saltar Supabase y solo usar Telegram + JSON local
     if signal.get("signal_type") == "shadow_mirror":
         persist_signal_local(signal)
-        await send_telegram_alert(signal)
+        await send_telegram_alert(signal, bot_token=bot_token, chat_id=chat_id)
         return
 
     # Persistencia local siempre (no falla)
@@ -202,32 +209,46 @@ async def dispatch_alert(signal: dict):
 
 
 # ── Test de conectividad ───────────────────────────────────────────────────────
-async def send_startup_message():
+async def send_startup_message(bot_token: str = None, chat_id: str = None):
     """Envia mensaje de arranque para verificar conectividad."""
+    token = bot_token or TELEGRAM_BOT_TOKEN
+    cid   = chat_id or TELEGRAM_CHAT_ID
+    
+    if not token or not cid:
+        return False
+        
     mode = "DRY RUN" if DRY_RUN else "LIVE"
     payload = {
-        "chat_id":    TELEGRAM_CHAT_ID,
+        "chat_id":    cid,
         "text":       f"Sistema Shadow Tracker Online\n{mode} -- Motor de deteccion activo.",
         "parse_mode": "Markdown",
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(TELEGRAM_API, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            url = get_telegram_api(token)
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 return resp.status == 200
     except Exception as e:
         logger.error(f"Startup message fallo: {e}")
         return False
 
 
-async def send_portfolio_summary():
+async def send_portfolio_summary(bot_token: str = None, chat_id: str = None):
     """Envia un resumen detallado del portafolio al estilo report_portfolio.py a Telegram."""
+    token = bot_token or TELEGRAM_BOT_TOKEN
+    cid   = chat_id or TELEGRAM_CHAT_ID
+    
+    if not token or not cid:
+        return
+        
     pnl_path = "artifacts/copy_trade_pnl.json"
     try:
         if not os.path.exists(pnl_path):
             msg = "Sin posiciones registradas todavía."
-            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+            payload = {"chat_id": cid, "text": msg}
             async with aiohttp.ClientSession() as session:
-                await session.post(TELEGRAM_API, json=payload)
+                url = get_telegram_api(token)
+                await session.post(url, json=payload)
             return
             
         with open(pnl_path, "r", encoding="utf-8") as f:
@@ -274,9 +295,10 @@ async def send_portfolio_summary():
             if len(abiertas) > 25:
                 msg += f"\n_... y {len(abiertas) - 25} más._\n"
 
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
+        payload = {"chat_id": cid, "text": msg, "parse_mode": "Markdown"}
         async with aiohttp.ClientSession() as session:
-            async with session.post(TELEGRAM_API, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            url = get_telegram_api(token)
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     logger.info("Resumen de portafolio enviado a Telegram.")
                 else:
@@ -285,19 +307,22 @@ async def send_portfolio_summary():
     except Exception as e:
         logger.error(f"Error en send_portfolio_summary: {e}")
 
-async def telegram_listener_loop():
+async def telegram_listener_loop(bot_token: str = None, chat_id: str = None):
     """Escucha mensajes de Telegram usando HTTP long polling de forma asíncrona.
     Permite interactuar con el bot y pedirle un reporte escribiendo cualquier mensaje."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    token = bot_token or TELEGRAM_BOT_TOKEN
+    cid   = chat_id or TELEGRAM_CHAT_ID
+
+    if not token or not cid:
         logger.warning("Faltan credenciales de Telegram. Listener offline.")
         return
         
     offset = None
-    logger.info("📡 Telegram Listener Activo. Escribe cualquier cosa al bot para recibir el reporte.")
+    logger.info(f"📡 Telegram Listener Activo [{cid}]. Escribe cualquier cosa al bot para recibir el reporte.")
     
     while True:
         try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+            url = f"https://api.telegram.org/bot{token}/getUpdates"
             params = {"timeout": 30}
             if offset:
                 params["offset"] = offset
@@ -313,9 +338,9 @@ async def telegram_listener_loop():
                             if message and "text" in message:
                                 chat_id = str(message.get("chat", {}).get("id"))
                                 # Seguridad: Solo procesar respuestas para el dueño del bot (nuestro chat_id)
-                                if chat_id == TELEGRAM_CHAT_ID:
-                                    logger.info("📨 Comando recibido en Telegram. Enviando el reporte de portafolio...")
-                                    await send_portfolio_summary()
+                                if chat_id == cid:
+                                    logger.info(f"📨 Comando recibido en Telegram ({cid}). Enviando el reporte de portafolio...")
+                                    await send_portfolio_summary(bot_token=token, chat_id=cid)
         except Exception as e:
             # Ignorar errores menores de conexión por timeout
             logger.debug(f"Error en telegram listener polling: {e}")

@@ -18,7 +18,6 @@ load_dotenv(".env.local")
 
 # ── Configuracion ──────────────────────────────────────────────────────────────
 DATA_API_URL   = "https://data-api.polymarket.com"
-TARGET_WALLET  = os.getenv("SHADOW_TARGET_WALLET", "").lower()
 POLL_INTERVAL  = int(os.getenv("SHADOW_POLL_INTERVAL", "5"))  # segundos
 
 os.makedirs("artifacts", exist_ok=True)
@@ -57,24 +56,24 @@ seen_hashes: set = load_seen()
 stats = {"polls": 0, "detected": 0, "errors": 0, "total_interceptadas": 0}
 
 # ── Motor de Polling ──────────────────────────────────────────────────────────
-async def fetch_latest_activity(session: aiohttp.ClientSession) -> list:
+async def fetch_latest_activity(session: aiohttp.ClientSession, wallet: str) -> list:
     """Consulta los ultimos trades del objetivo via REST."""
     url = f"{DATA_API_URL}/activity"
-    params = {"user": TARGET_WALLET, "limit": 20}
+    params = {"user": wallet, "limit": 20}
     try:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=8)) as resp:
             if resp.status == 200:
                 return await resp.json()
             else:
-                logger.warning(f"Data API respondio {resp.status}")
+                logger.warning(f"Data API respondio {resp.status} para {wallet}")
                 stats["errors"] += 1
                 return []
     except Exception as e:
-        logger.error(f"Error en fetch_latest_activity: {e}")
+        logger.error(f"Error en fetch_latest_activity ({wallet}): {e}")
         stats["errors"] += 1
         return []
 
-async def process_new_trade(trade: dict, signal_queue: asyncio.Queue):
+async def process_new_trade(trade: dict, signal_queue: asyncio.Queue, wallet: str, bot_token: str, chat_id: str):
     """Procesa un trade nuevo del objetivo."""
     tx_hash     = trade.get("transactionHash", "")
     market_id   = trade.get("conditionId", "")
@@ -111,27 +110,30 @@ async def process_new_trade(trade: dict, signal_queue: asyncio.Queue):
         "trade_size_usdc": usdc_size,
         "signal_type":     "shadow_mirror",
         "tier":            "TIER_1",
-        "wallet_address":  TARGET_WALLET,
+        "wallet_address":  wallet,
         "timestamp":       datetime.now(timezone.utc).isoformat(),
     }
     await signal_queue.put(signal)
-    await dispatch_alert(signal)
+    await dispatch_alert(signal, bot_token=bot_token, chat_id=chat_id)
 
-async def shadow_poller(signal_queue: asyncio.Queue):
+async def shadow_poller(signal_queue: asyncio.Queue, profile: dict):
     """Loop principal: consulta la actividad del objetivo cada N segundos."""
-    if not TARGET_WALLET:
-        logger.error("ERROR: SHADOW_TARGET_WALLET no definida en .env.local")
+    wallet = profile["wallet"]
+    bot_token = profile["bot_token"]
+    chat_id = profile["chat_id"]
+
+    if not wallet:
+        logger.error(f"ERROR: Wallet no definida para un perfil.")
         return
 
-    logger.info(f"[SHADOW v2.0] Motor de Espejo activo.")
-    logger.info(f"  -> Objetivo : {TARGET_WALLET}")
+    logger.info(f"[SHADOW v2.0] Motor de Espejo activo para {wallet[:10]}...")
+    logger.info(f"  -> Destino Telegram: {chat_id}")
     logger.info(f"  -> Intervalo: {POLL_INTERVAL}s")
-    logger.info(f"  -> Trades vistos en cache: {len(seen_hashes)}")
 
     async with aiohttp.ClientSession() as session:
         while True:
             stats["polls"] += 1
-            trades = await fetch_latest_activity(session)
+            trades = await fetch_latest_activity(session, wallet)
 
             new_trades = []
             for trade in trades:
@@ -142,7 +144,7 @@ async def shadow_poller(signal_queue: asyncio.Queue):
 
             if new_trades:
                 save_seen(seen_hashes)
-                logger.info(f"[RADAR] {len(new_trades)} trade(s) nuevos detectados del objetivo!")
+                logger.info(f"[RADAR] {len(new_trades)} trade(s) nuevos para {wallet[:8]}!")
 
                 # Agrupar micro-trades del mismo mercado en una sola señal
                 grouped: dict[str, dict] = {}
@@ -153,14 +155,12 @@ async def shadow_poller(signal_queue: asyncio.Queue):
                     if key not in grouped:
                         grouped[key] = trade.copy()
                         grouped[key]["_total_usdc"] = float(trade.get("usdcSize", 0))
-                        grouped[key]["_trade_count"] = 1
                     else:
                         grouped[key]["_total_usdc"] += float(trade.get("usdcSize", 0))
-                        grouped[key]["_trade_count"] += 1
 
                 for grouped_trade in grouped.values():
                     grouped_trade["usdcSize"] = grouped_trade["_total_usdc"]
-                    await process_new_trade(grouped_trade, signal_queue)
+                    await process_new_trade(grouped_trade, signal_queue, wallet, bot_token, chat_id)
             else:
                 if stats["polls"] % 12 == 0:  # Heartbeat cada ~60s
                     logger.info(
@@ -174,12 +174,42 @@ async def shadow_poller(signal_queue: asyncio.Queue):
 
 async def main():
     signal_queue = asyncio.Queue()
-    logger.info("Iniciando Shadow Tracker v2.0 (REST Polling)...")
-    await asyncio.gather(
-        shadow_poller(signal_queue),
-        run_copy_trader(signal_queue),
-        telegram_listener_loop(),
-    )
+    
+    # Cargar perfiles desde .env.local
+    profiles = []
+    for i in range(1, 11): # Soporte hasta 10 perfiles
+        wallet = os.getenv(f"SHADOW_TARGET_WALLET_{i}")
+        if wallet:
+            profiles.append({
+                "wallet": wallet.lower(),
+                "bot_token": os.getenv(f"TELEGRAM_BOT_TOKEN_{i}"),
+                "chat_id": os.getenv(f"TELEGRAM_CHAT_ID_{i}")
+            })
+    
+    # Si no hay perfiles numerados, intentar el antiguo formato
+    if not profiles:
+        wallet = os.getenv("SHADOW_TARGET_WALLET")
+        if wallet:
+            profiles.append({
+                "wallet": wallet.lower(),
+                "bot_token": os.getenv("TELEGRAM_BOT_TOKEN"),
+                "chat_id": os.getenv("TELEGRAM_CHAT_ID")
+            })
+
+    if not profiles:
+        logger.error("No se encontraron perfiles de tracking configurados.")
+        return
+
+    logger.info(f"Iniciando Shadow Tracker v2.0 con {len(profiles)} objetivos...")
+    
+    tasks = [run_copy_trader(signal_queue)]
+    for p in profiles:
+        tasks.append(shadow_poller(signal_queue, p))
+        tasks.append(telegram_listener_loop(bot_token=p["bot_token"], chat_id=p["chat_id"]))
+        # Enviar mensaje de arranque opcional
+        asyncio.create_task(send_startup_message(bot_token=p["bot_token"], chat_id=p["chat_id"]))
+
+    await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
     asyncio.run(main())
