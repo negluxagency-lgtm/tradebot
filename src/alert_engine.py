@@ -450,20 +450,18 @@ async def send_dashboard_summary(profiles: list, bot_token: str = None, chat_id:
     # Calcular Balance Real Proxy y Portfolio
     balance_usdc = await get_usdc_balance(PROXY_ADDRESS) if not DRY_RUN else 269.0
     total_portfolio = balance_usdc + total_en_juego
-    real_net_profit = total_portfolio - INITIAL_CAPITAL
     
-    profit_sign = "+" if real_net_profit >= 0 else ""
+    total_sign = "+" if total_pnl >= 0 else ""
     
     msg += (
         f"\n─────────────────────\n"
         f"🌐 *TOTALES FLOTA*\n"
         f"  💰 En juego: `${total_en_juego:.2f}`\n"
         f"  🎲 Total jugado: `${total_jugado:.2f}`\n"
-        f"  📈 Shadow P/L (Cerradas): `{'+' if total_pnl >= 0 else ''}{total_pnl:.2f}`\n\n"
-        f"🏦 *CONTABILIDAD MAESTRA*\n"
+        f"  📈 *Beneficio Total (Suma Bots):* `{total_sign}{total_pnl:.2f}`\n\n"
+        f"🏦 *BALANCE DE CUENTA*\n"
         f"  💵 Wallet Saldo: `${balance_usdc:.2f}`\n"
         f"  📊 Portfolio Actual: `${total_portfolio:.2f}`\n"
-        f"  🚀 *Beneficio Neto:* `{profit_sign}{real_net_profit:.2f}`\n"
         f"─────────────────────\n"
         f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
     )
