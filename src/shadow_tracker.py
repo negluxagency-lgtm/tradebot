@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from copy_trader import run_copy_trader
 from alert_engine import dispatch_alert, send_portfolio_summary, telegram_listener_loop, send_startup_message
 
-load_dotenv(".env.local")
+load_dotenv(".env.local", override=True)
 
 # ── Configuracion ──────────────────────────────────────────────────────────────
 DATA_API_URL   = "https://data-api.polymarket.com"
