@@ -360,15 +360,45 @@ async def telegram_listener_loop(bot_token: str = None, chat_id: str = None, wal
         await asyncio.sleep(2)
 
 
+# ── Funciones Utilitarias ─ Balances USDC ─────────────────────────────────────────
+async def get_usdc_balance(address: str) -> float:
+    """Obtiene el balance de USDC de la wallet usando el nodo publico de Polygon."""
+    if not address or address == "unknown":
+        return 0.0
+    url = "https://polygon-rpc.com"
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "eth_call",
+        "params": [{
+            "to": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            "data": "0x70a08231000000000000000000000000" + address[2:].zfill(40)
+        }, "latest"],
+        "id": 1
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=5) as resp:
+                data = await resp.json()
+                rhex = data.get("result", "0x0")
+                if rhex == "0x": rhex = "0x0"
+                return int(rhex, 16) / 1e6
+    except Exception as e:
+        logger.error(f"Error RPC: {e}")
+        return 0.0
+
+
 # ── Dashboard Centralizado (Reporte Consolidado de todos los perfiles) ─────────
 async def send_dashboard_summary(profiles: list, bot_token: str = None, chat_id: str = None):
     """
     Envía un reporte consolidado de los 3 perfiles al bot de control central.
     Cada perfil muestra: capital en juego, total jugado y P/L individual.
-    Al final, muestra los totales sumados de toda la flota.
+    Al final, calcula el Portfolio Total y Beneficio Neto usando INITIAL_CAPITAL.
     """
     token = bot_token or DASHBOARD_BOT_TOKEN
     cid   = chat_id or DASHBOARD_CHAT_ID
+    
+    INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "269"))
+    PROXY_ADDRESS = os.getenv("POLYMARKET_PROXY_ADDRESS", "")
 
     if not token or not cid:
         logger.warning("Dashboard Bot no configurado. Omitiendo reporte consolidado.")
@@ -417,13 +447,23 @@ async def send_dashboard_summary(profiles: list, bot_token: str = None, chat_id:
             f"  📈 P/L: `{pnl_sign}${pnl:.2f}`\n"
         )
 
-    total_sign = "+" if total_pnl >= 0 else ""
+    # Calcular Balance Real Proxy y Portfolio
+    balance_usdc = await get_usdc_balance(PROXY_ADDRESS) if not DRY_RUN else 269.0
+    total_portfolio = balance_usdc + total_en_juego
+    real_net_profit = total_portfolio - INITIAL_CAPITAL
+    
+    profit_sign = "+" if real_net_profit >= 0 else ""
+    
     msg += (
         f"\n─────────────────────\n"
         f"🌐 *TOTALES FLOTA*\n"
         f"  💰 En juego: `${total_en_juego:.2f}`\n"
         f"  🎲 Total jugado: `${total_jugado:.2f}`\n"
-        f"  📈 P/L Total: `{total_sign}${total_pnl:.2f}`\n"
+        f"  📈 Shadow P/L (Cerradas): `{'+' if total_pnl >= 0 else ''}{total_pnl:.2f}`\n\n"
+        f"🏦 *CONTABILIDAD MAESTRA*\n"
+        f"  💵 Wallet Saldo: `${balance_usdc:.2f}`\n"
+        f"  📊 Portfolio Actual: `${total_portfolio:.2f}`\n"
+        f"  🚀 *Beneficio Neto:* `{profit_sign}{real_net_profit:.2f}`\n"
         f"─────────────────────\n"
         f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
     )
