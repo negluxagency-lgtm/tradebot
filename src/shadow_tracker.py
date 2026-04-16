@@ -73,7 +73,7 @@ async def fetch_latest_activity(session: aiohttp.ClientSession, wallet: str) -> 
         stats["errors"] += 1
         return []
 
-async def process_new_trade(trade: dict, signal_queue: asyncio.Queue, wallet: str, bot_token: str, chat_id: str):
+async def process_new_trade(trade: dict, signal_queue: asyncio.Queue, wallet: str, bot_token: str, chat_id: str, profile: dict = {}):
     """Procesa un trade nuevo del objetivo."""
     tx_hash     = trade.get("transactionHash", "")
     market_id   = trade.get("conditionId", "")
@@ -111,6 +111,7 @@ async def process_new_trade(trade: dict, signal_queue: asyncio.Queue, wallet: st
         "signal_type":     "shadow_mirror",
         "tier":            "TIER_1",
         "wallet_address":  wallet,
+        "copy_ratio":      profile.get("copy_ratio", float(os.getenv("SHADOW_COPY_RATIO", "0.01"))),
         "timestamp":       datetime.now(timezone.utc).isoformat(),
     }
     await signal_queue.put(signal)
@@ -121,6 +122,7 @@ async def shadow_poller(signal_queue: asyncio.Queue, profile: dict):
     wallet = profile["wallet"]
     bot_token = profile["bot_token"]
     chat_id = profile["chat_id"]
+    copy_ratio = profile.get("copy_ratio", float(os.getenv("SHADOW_COPY_RATIO", "0.01")))
 
     if not wallet:
         logger.error(f"ERROR: Wallet no definida para un perfil.")
@@ -160,7 +162,7 @@ async def shadow_poller(signal_queue: asyncio.Queue, profile: dict):
 
                 for grouped_trade in grouped.values():
                     grouped_trade["usdcSize"] = grouped_trade["_total_usdc"]
-                    await process_new_trade(grouped_trade, signal_queue, wallet, bot_token, chat_id)
+                    await process_new_trade(grouped_trade, signal_queue, wallet, bot_token, chat_id, profile)
             else:
                 if stats["polls"] % 12 == 0:  # Heartbeat cada ~60s
                     logger.info(
@@ -183,7 +185,8 @@ async def main():
             profiles.append({
                 "wallet": wallet.lower(),
                 "bot_token": os.getenv(f"TELEGRAM_BOT_TOKEN_{i}"),
-                "chat_id": os.getenv(f"TELEGRAM_CHAT_ID_{i}")
+                "chat_id": os.getenv(f"TELEGRAM_CHAT_ID_{i}"),
+                "copy_ratio": float(os.getenv(f"SHADOW_COPY_RATIO_{i}", os.getenv("SHADOW_COPY_RATIO", "0.01")))
             })
     
     # Si no hay perfiles numerados, intentar el antiguo formato
@@ -193,7 +196,8 @@ async def main():
             profiles.append({
                 "wallet": wallet.lower(),
                 "bot_token": os.getenv("TELEGRAM_BOT_TOKEN"),
-                "chat_id": os.getenv("TELEGRAM_CHAT_ID")
+                "chat_id": os.getenv("TELEGRAM_CHAT_ID"),
+                "copy_ratio": float(os.getenv("SHADOW_COPY_RATIO", "0.01"))
             })
 
     if not profiles:

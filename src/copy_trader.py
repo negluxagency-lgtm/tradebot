@@ -142,8 +142,9 @@ async def execute_copy_trade(signal: dict) -> dict:
     # Calcular capital: proporcional para shadow_mirror, fijo para el resto
     if signal.get("signal_type") == "shadow_mirror":
         raw_usdc   = float(signal.get("trade_size_usdc", 0))
-        capital    = round(max(SHADOW_MIN_USDC, raw_usdc * SHADOW_COPY_RATIO), 2)
-        ratio_pct  = int(SHADOW_COPY_RATIO * 100)
+        ratio      = float(signal.get("copy_ratio", SHADOW_COPY_RATIO))
+        capital    = round(max(SHADOW_MIN_USDC, raw_usdc * ratio), 2)
+        ratio_pct  = round(ratio * 100, 2)
         logger.info(f"[SHADOW] Capital proporcional: {ratio_pct}% de ${raw_usdc:.2f} = ${capital:.2f} USDC")
     else:
         capital = COPY_TRADE_USDC
