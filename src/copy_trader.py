@@ -170,6 +170,33 @@ async def execute_copy_trade(signal: dict) -> dict:
     else:
         capital = COPY_TRADE_USDC
 
+    # Cálculo inicial de shares basado en capital
+    size_shares = round(capital / price, 2) if price > 0 else 0
+
+    # ── Min Size Guard & Safety Cap ($7) ──────────────────────────────────────
+    if not DRY_RUN and clob_client and side == "BUY":
+        try:
+            book = await asyncio.to_thread(clob_client.get_book, asset_id)
+            min_shares = float(book.get("min_order_size", 0))
+            if min_shares > 0 and size_shares < min_shares:
+                required_capital = round(min_shares * price, 2)
+                if required_capital > 7.0:
+                    logger.warning(
+                        f"⚠️ ABORTO: Mínimo de mercado ({min_shares} shares) requiere ${required_capital:.2f}, "
+                        f"que supera el tope de $7.00. Mercado: {market_id}"
+                    )
+                    return {
+                        "status": "failed",
+                        "error": f"Safety Cap Exceeded: needs ${required_capital} for min {min_shares} shares",
+                        "market_id": market_id
+                    }
+                
+                logger.info(f"⚖️ ESCALANDO AL MÍNIMO: {size_shares} -> {min_shares} shares (Costo: ${required_capital:.2f})")
+                size_shares = min_shares
+                capital = required_capital
+        except Exception as e:
+            logger.warning(f"No se pudo consultar min_order_size del libro: {e}. Procediendo con cálculo base.")
+
     position = {
         "trade_id":        trade_id,
         "market_id":       market_id,
@@ -179,7 +206,7 @@ async def execute_copy_trade(signal: dict) -> dict:
         "entry_price":     price,
         "side":            side,
         "copy_trade_usdc": capital,
-        "size_shares":     round(capital / price, 2) if price > 0 else 0,
+        "size_shares":     size_shares,
         "signal_type":     signal.get("signal_type", "shadow_mirror"),
         "wallet_address":  signal.get("wallet_address", "unknown"),
         "whale_size_usdc": signal.get("trade_size_usdc", 0.0),
