@@ -11,6 +11,10 @@ import aiohttp
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import OrderArgs
+from py_clob_client.order_builder.constants import BUY, SELL
+
 load_dotenv(".env.local")
 
 # ── Configuración ──────────────────────────────────────────────────────────────
@@ -31,6 +35,23 @@ MAX_PRICE             = 0.85   # no copiar si el precio ya superó 0.85 USDC
 MIN_MINUTES_TO_CLOSE  = 30     # no copiar si el mercado cierra en < 30 min
 
 logger = logging.getLogger("copy_trader")
+
+# ── Clob Client ────────────────────────────────────────────────────────────────
+try:
+    clob_client = ClobClient(
+        host=CLOB_API_URL,
+        key=PRIVATE_KEY,
+        chain_id=int(os.getenv("POLY_CHAIN_ID", "137")),
+        signature_type=int(os.getenv("POLY_SIGNATURE_TYPE", "0")),
+        funder=PROXY_ADDRESS,
+    )
+    clob_creds = clob_client.create_or_derive_api_creds()
+    clob_client.set_api_creds(clob_creds)
+    logger.info("✅ ClobClient Inicializado con Éxito")
+except Exception as e:
+    logger.error(f"❌ Error inicializando ClobClient: {e}")
+    clob_client = None
+
 
 
 # ── Estado de posiciones ───────────────────────────────────────────────────────
@@ -190,40 +211,34 @@ async def execute_copy_trade(signal: dict) -> dict:
         return position
 
     # ── Ejecución Real ─────────────────────────────────────────────────────────
-    headers = {
-        "POLY-API-KEY":     RELAYER_API_KEY or "",
-        "POLY-ADDRESS":     RELAYER_API_KEY_ADDR or "",
-        "Content-Type":     "application/json",
-    }
-    order_payload = {
-        "tokenID":  asset_id,
-        "price":    price,
-        "side":     side,
-        "size":     position["size_shares"],
-        "feeRateBps": "0",
-        "nonce":    "0",
-        "expiration": "0",
-    }
+    if not clob_client:
+        logger.error("❌ ClobClient no inicializado. Cancelando ejecución.")
+        position["status"] = "failed"
+        position["error"]  = "ClobClient offline"
+        save_position(position)
+        return position
+
+    order_args = OrderArgs(
+        price=price,
+        size=position["size_shares"],
+        side=BUY if side == "BUY" else SELL,
+        token_id=asset_id,
+    )
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{CLOB_API_URL}/order",
-                json=order_payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                resp_data = await resp.json()
-                if resp.status in (200, 201) and resp_data.get("success"):
-                    position["order_id"] = resp_data.get("orderID")
-                    logger.info(f"✅ Orden {side} ejecutada: {position['order_id']}")
-                    if side == "SELL" and market_id in open_positions:
-                         open_positions.pop(market_id)
-                         position["status"] = "closed"
-                else:
-                    logger.error(f"❌ Error en orden {side}: {resp.status} | {resp_data}")
-                    position["status"] = "failed"
-                    position["error"]  = str(resp_data)
+        # Petición a Polymarket API enviada en un thread separado para no bloquear asynico
+        resp = await asyncio.to_thread(clob_client.create_and_post_order, order_args)
+        
+        if resp and resp.get("success"):
+            position["order_id"] = resp.get("orderID", "unknown")
+            logger.info(f"✅ Orden {side} ejecutada: {position['order_id']}")
+            if side == "SELL" and market_id in open_positions:
+                 open_positions.pop(market_id)
+                 position["status"] = "closed"
+        else:
+            logger.error(f"❌ Error en orden {side}: {resp}")
+            position["status"] = "failed"
+            position["error"]  = str(resp)
     except Exception as e:
         logger.error(f"❌ Excepción ejecutando orden {side}: {e}")
         position["status"] = "failed"
