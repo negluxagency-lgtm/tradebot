@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from copy_trader import run_copy_trader
-from alert_engine import dispatch_alert, send_portfolio_summary, telegram_listener_loop, send_startup_message
+from alert_engine import dispatch_alert, send_portfolio_summary, telegram_listener_loop, send_startup_message, dashboard_listener_loop
 
 load_dotenv(".env.local", override=True)
 
@@ -186,7 +186,8 @@ async def main():
                 "wallet": wallet.lower(),
                 "bot_token": os.getenv(f"TELEGRAM_BOT_TOKEN_{i}"),
                 "chat_id": os.getenv(f"TELEGRAM_CHAT_ID_{i}"),
-                "copy_ratio": float(os.getenv(f"SHADOW_COPY_RATIO_{i}", os.getenv("SHADOW_COPY_RATIO", "0.01")))
+                "copy_ratio": float(os.getenv(f"SHADOW_COPY_RATIO_{i}", os.getenv("SHADOW_COPY_RATIO", "0.01"))),
+                "label": f"Bot {i} ({wallet[:6]}...)"
             })
     
     # Si no hay perfiles numerados, intentar el antiguo formato
@@ -210,8 +211,16 @@ async def main():
     for p in profiles:
         tasks.append(shadow_poller(signal_queue, p))
         tasks.append(telegram_listener_loop(bot_token=p["bot_token"], chat_id=p["chat_id"], wallet=p["wallet"]))
-        # Enviar mensaje de arranque opcional
         asyncio.create_task(send_startup_message(bot_token=p["bot_token"], chat_id=p["chat_id"]))
+
+    # Dashboard centralizado: bot de control que agrupa todos los perfiles
+    dash_token = os.getenv("DASHBOARD_BOT_TOKEN")
+    dash_chat  = os.getenv("DASHBOARD_CHAT_ID")
+    if dash_token and dash_chat and dash_token != "TU_DASHBOARD_BOT_TOKEN_AQUI":
+        tasks.append(dashboard_listener_loop(profiles, bot_token=dash_token, chat_id=dash_chat))
+        logger.info(f"📊 Dashboard Bot activo. Escribe al bot de control para ver el reporte de flota.")
+    else:
+        logger.warning("⚠️  DASHBOARD_BOT_TOKEN no configurado. Listener de control offline.")
 
     await asyncio.gather(*tasks)
 

@@ -16,6 +16,8 @@ load_dotenv(".env.local")
 # Dejamos estos para compatibilidad con otros módulos, pero usaremos parámetros dinámicos cuando sea posible.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
+DASHBOARD_BOT_TOKEN = os.getenv("DASHBOARD_BOT_TOKEN")
+DASHBOARD_CHAT_ID   = os.getenv("DASHBOARD_CHAT_ID")
 SUPABASE_URL       = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 SUPABASE_KEY       = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 DRY_RUN            = os.getenv("DRY_RUN", "true").lower() == "true"
@@ -355,4 +357,126 @@ async def telegram_listener_loop(bot_token: str = None, chat_id: str = None, wal
             # Ignorar errores menores de conexión por timeout
             logger.debug(f"Error en telegram listener polling: {e}")
             
+        await asyncio.sleep(2)
+
+
+# ── Dashboard Centralizado (Reporte Consolidado de todos los perfiles) ─────────
+async def send_dashboard_summary(profiles: list, bot_token: str = None, chat_id: str = None):
+    """
+    Envía un reporte consolidado de los 3 perfiles al bot de control central.
+    Cada perfil muestra: capital en juego, total jugado y P/L individual.
+    Al final, muestra los totales sumados de toda la flota.
+    """
+    token = bot_token or DASHBOARD_BOT_TOKEN
+    cid   = chat_id or DASHBOARD_CHAT_ID
+
+    if not token or not cid:
+        logger.warning("Dashboard Bot no configurado. Omitiendo reporte consolidado.")
+        return
+
+    pnl_path = "artifacts/copy_trade_pnl.json"
+    mode_tag = "🟡 DRY RUN" if DRY_RUN else "🟢 LIVE"
+
+    try:
+        all_data = []
+        if os.path.exists(pnl_path):
+            with open(pnl_path, "r", encoding="utf-8") as f:
+                all_data = json.load(f)
+    except Exception:
+        all_data = []
+
+    msg = f"📊 *FLOTA SHADOW — REPORTE CONSOLIDADO* ({mode_tag})\n"
+    msg += f"─────────────────────\n"
+
+    total_en_juego  = 0.0
+    total_jugado    = 0.0
+    total_pnl       = 0.0
+
+    for idx, profile in enumerate(profiles, 1):
+        wallet = profile.get("wallet", "").lower()
+        label  = profile.get("label", f"Bot {idx}")
+
+        data = [p for p in all_data if p.get("wallet_address", "").lower() == wallet]
+
+        abiertas = [p for p in data if p.get("status") == "open"]
+        cerradas = [p for p in data if p.get("status") == "closed"]
+
+        en_juego = sum(float(p.get("copy_trade_usdc", 0) or 0) for p in abiertas)
+        jugado   = sum(float(p.get("copy_trade_usdc", 0) or 0) for p in data)
+        pnl      = sum(float(p.get("pnl_usdc", 0) or 0) for p in cerradas)
+
+        total_en_juego += en_juego
+        total_jugado   += jugado
+        total_pnl      += pnl
+
+        pnl_sign = "+" if pnl >= 0 else ""
+        msg += (
+            f"\n*{label}* (`{wallet[:8]}...`)\n"
+            f"  💰 En juego: `${en_juego:.2f}`\n"
+            f"  🎲 Total jugado: `${jugado:.2f}`\n"
+            f"  📈 P/L: `{pnl_sign}${pnl:.2f}`\n"
+        )
+
+    total_sign = "+" if total_pnl >= 0 else ""
+    msg += (
+        f"\n─────────────────────\n"
+        f"🌐 *TOTALES FLOTA*\n"
+        f"  💰 En juego: `${total_en_juego:.2f}`\n"
+        f"  🎲 Total jugado: `${total_jugado:.2f}`\n"
+        f"  📈 P/L Total: `{total_sign}${total_pnl:.2f}`\n"
+        f"─────────────────────\n"
+        f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
+    )
+
+    payload = {"chat_id": cid, "text": msg, "parse_mode": "Markdown"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = get_telegram_api(token)
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    logger.info("✅ Dashboard consolidado enviado.")
+                else:
+                    body = await resp.text()
+                    logger.error(f"❌ Error enviando dashboard: {resp.status} - {body}")
+    except Exception as e:
+        logger.error(f"❌ Excepción en send_dashboard_summary: {e}")
+
+
+async def dashboard_listener_loop(profiles: list, bot_token: str = None, chat_id: str = None):
+    """
+    Escucha mensajes en el bot de control central y responde con el reporte
+    consolidado de todos los perfiles.
+    """
+    token = bot_token or DASHBOARD_BOT_TOKEN
+    cid   = chat_id or DASHBOARD_CHAT_ID
+
+    if not token or not cid:
+        logger.warning("Dashboard Bot no configurado. Listener offline.")
+        return
+
+    offset = None
+    logger.info(f"📡 Dashboard Listener Activo [{cid}]. Escribe al bot de control para ver el reporte total.")
+
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{token}/getUpdates"
+            params = {"timeout": 30}
+            if offset:
+                params["offset"] = offset
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=40)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for result in data.get("result", []):
+                            offset = result["update_id"] + 1
+                            message = result.get("message")
+                            if message and "text" in message:
+                                incoming_chat_id = str(message.get("chat", {}).get("id"))
+                                if incoming_chat_id == cid:
+                                    logger.info("📨 Comando recibido en Dashboard. Preparando reporte de flota...")
+                                    await send_dashboard_summary(profiles, bot_token=token, chat_id=cid)
+        except Exception as e:
+            logger.debug(f"Error en dashboard listener: {e}")
+
         await asyncio.sleep(2)
