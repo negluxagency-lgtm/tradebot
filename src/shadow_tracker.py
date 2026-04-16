@@ -205,7 +205,7 @@ async def main():
     tasks = [run_copy_trader(signal_queue)]
     for p in profiles:
         tasks.append(shadow_poller(signal_queue, p))
-        tasks.append(telegram_listener_loop(bot_token=p["bot_token"], chat_id=p["chat_id"]))
+        tasks.append(telegram_listener_loop(bot_token=p["bot_token"], chat_id=p["chat_id"], wallet=p["wallet"]))
         # Enviar mensaje de arranque opcional
         asyncio.create_task(send_startup_message(bot_token=p["bot_token"], chat_id=p["chat_id"]))
 

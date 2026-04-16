@@ -233,8 +233,8 @@ async def send_startup_message(bot_token: str = None, chat_id: str = None):
         return False
 
 
-async def send_portfolio_summary(bot_token: str = None, chat_id: str = None):
-    """Envia un resumen detallado del portafolio al estilo report_portfolio.py a Telegram."""
+async def send_portfolio_summary(bot_token: str = None, chat_id: str = None, wallet: str = None):
+    """Envia un resumen detallado del portafolio filtrado por billetera si se especifica."""
     token = bot_token or TELEGRAM_BOT_TOKEN
     cid   = chat_id or TELEGRAM_CHAT_ID
     
@@ -256,6 +256,16 @@ async def send_portfolio_summary(bot_token: str = None, chat_id: str = None):
 
         if not data:
             return
+
+        if wallet:
+            data = [p for p in data if p.get("wallet_address") == wallet]
+            if not data:
+                msg = f"Sin posiciones registradas para la billetera {wallet[:10]}..."
+                payload = {"chat_id": cid, "text": msg}
+                async with aiohttp.ClientSession() as session:
+                    url = get_telegram_api(token)
+                    await session.post(url, json=payload)
+                return
 
         abiertas       = [p for p in data if p.get("status") == "open"]
         cerradas       = [p for p in data if p.get("status") == "closed"]
@@ -307,7 +317,7 @@ async def send_portfolio_summary(bot_token: str = None, chat_id: str = None):
     except Exception as e:
         logger.error(f"Error en send_portfolio_summary: {e}")
 
-async def telegram_listener_loop(bot_token: str = None, chat_id: str = None):
+async def telegram_listener_loop(bot_token: str = None, chat_id: str = None, wallet: str = None):
     """Escucha mensajes de Telegram usando HTTP long polling de forma asíncrona.
     Permite interactuar con el bot y pedirle un reporte escribiendo cualquier mensaje."""
     token = bot_token or TELEGRAM_BOT_TOKEN
@@ -339,8 +349,8 @@ async def telegram_listener_loop(bot_token: str = None, chat_id: str = None):
                                 chat_id = str(message.get("chat", {}).get("id"))
                                 # Seguridad: Solo procesar respuestas para el dueño del bot (nuestro chat_id)
                                 if chat_id == cid:
-                                    logger.info(f"📨 Comando recibido en Telegram ({cid}). Enviando el reporte de portafolio...")
-                                    await send_portfolio_summary(bot_token=token, chat_id=cid)
+                                    logger.info(f"📨 Comando recibido en Telegram ({cid}). Enviando reporte para {wallet[:10]}...")
+                                    await send_portfolio_summary(bot_token=token, chat_id=cid, wallet=wallet)
         except Exception as e:
             # Ignorar errores menores de conexión por timeout
             logger.debug(f"Error en telegram listener polling: {e}")

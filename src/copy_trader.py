@@ -159,6 +159,7 @@ async def execute_copy_trade(signal: dict) -> dict:
         "copy_trade_usdc": capital,
         "size_shares":     round(capital / price, 2) if price > 0 else 0,
         "signal_type":     signal.get("signal_type", "shadow_mirror"),
+        "wallet_address":  signal.get("wallet_address", "unknown"),
         "whale_size_usdc": signal.get("trade_size_usdc", 0.0),
         "impact_score":    signal.get("impact_score", 0.0),
         "status":          "open",
