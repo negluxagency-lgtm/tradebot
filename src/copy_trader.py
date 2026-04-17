@@ -29,7 +29,7 @@ MAX_CONCURRENT        = int(os.getenv("MAX_CONCURRENT_POSITIONS", "8"))
 DRY_RUN               = os.getenv("DRY_RUN", "true").lower() == "true"
 SHADOW_COPY_RATIO     = float(os.getenv("SHADOW_COPY_RATIO", "0.01"))   # Ratio base (fallback)
 SHADOW_MIN_USDC       = float(os.getenv("SHADOW_MIN_USDC", "1.01"))    # Mínimo operativo Polymarket
-MIN_WHALE_USDC        = 1.0    # Apuesta mínima de la ballena para ser señal válida
+MIN_WHALE_USDC        = 10.0   # Apuesta mínima de la ballena para ser señal válida
 
 # Salvaguardas duras
 MAX_PRICE             = 0.85   # no copiar si el precio ya superó 0.85 USDC
@@ -39,12 +39,10 @@ MIN_MINUTES_TO_CLOSE  = 30     # no copiar si el mercado cierra en < 30 min
 # Puntos de referencia: (apuesta_ballena_usdc, nuestra_apuesta_usdc)
 # Para montos >$1000 se aplica: min(whale * 0.01, 27.0)
 _TIERED_TABLE = [
-    (1,    1.00),
-    (2,    1.20),
-    (10,   1.75),
-    (20,   3.00),
-    (50,   5.00),
-    (100,  7.50),
+    (10,   1.01),
+    (20,   2.00),
+    (50,   3.00),
+    (100,  5.00),
     (200,  10.00),
     (500,  12.00),
     (1000, 15.00),
