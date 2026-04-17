@@ -164,11 +164,22 @@ async def execute_copy_trade(signal: dict) -> dict:
     if signal.get("signal_type") == "shadow_mirror":
         raw_usdc   = float(signal.get("trade_size_usdc", 0))
         ratio      = float(signal.get("copy_ratio", SHADOW_COPY_RATIO))
-        capital    = round(max(SHADOW_MIN_USDC, raw_usdc * ratio), 2)
+        capital    = round(raw_usdc * ratio, 2)
         ratio_pct  = round(ratio * 100, 2)
+        
+        # Filtro de Convicción Mínima
+        if capital < SHADOW_MIN_USDC:
+            logger.info(f"⏭️ [SHADOW SKIP] Apuesta {ratio_pct}% de ${raw_usdc:.2f} = ${capital:.2f} USDC (menor que el mínimo ${SHADOW_MIN_USDC}). Evitando ruido.")
+            return {
+                "status": "skipped",
+                "error": f"Dust trade skipped (${capital:.2f} < ${SHADOW_MIN_USDC})",
+                "market_id": market_id
+            }
+            
         logger.info(f"[SHADOW] Capital proporcional: {ratio_pct}% de ${raw_usdc:.2f} = ${capital:.2f} USDC")
     else:
         capital = COPY_TRADE_USDC
+
 
     # Cálculo inicial de shares basado en capital
     size_shares = round(capital / price, 2) if price > 0 else 0
