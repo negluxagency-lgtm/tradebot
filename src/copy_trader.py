@@ -171,6 +171,7 @@ async def execute_copy_trade(signal: dict) -> dict:
         if capital < SHADOW_MIN_USDC:
             logger.info(f"⏭️ [SHADOW SKIP] Apuesta {ratio_pct}% de ${raw_usdc:.2f} = ${capital:.2f} USDC (menor que el mínimo ${SHADOW_MIN_USDC}). Evitando ruido.")
             return {
+                "trade_id": trade_id,
                 "status": "skipped",
                 "error": f"Dust trade skipped (${capital:.2f} < ${SHADOW_MIN_USDC})",
                 "market_id": market_id
