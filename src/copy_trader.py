@@ -27,12 +27,44 @@ PROXY_ADDRESS         = os.getenv("POLYMARKET_PROXY_ADDRESS")
 COPY_TRADE_USDC       = float(os.getenv("COPY_TRADE_USDC", "100"))
 MAX_CONCURRENT        = int(os.getenv("MAX_CONCURRENT_POSITIONS", "8"))
 DRY_RUN               = os.getenv("DRY_RUN", "true").lower() == "true"
-SHADOW_COPY_RATIO     = float(os.getenv("SHADOW_COPY_RATIO", "0.10"))  # 10% del trade objetivo
-SHADOW_MIN_USDC       = float(os.getenv("SHADOW_MIN_USDC", "1.0"))     # Minimo a ejecutar
+SHADOW_COPY_RATIO     = float(os.getenv("SHADOW_COPY_RATIO", "0.01"))   # Ratio base (fallback)
+SHADOW_MIN_USDC       = float(os.getenv("SHADOW_MIN_USDC", "1.01"))    # Mínimo operativo Polymarket
+MIN_WHALE_USDC        = 1.0    # Apuesta mínima de la ballena para ser señal válida
 
 # Salvaguardas duras
 MAX_PRICE             = 0.85   # no copiar si el precio ya superó 0.85 USDC
 MIN_MINUTES_TO_CLOSE  = 30     # no copiar si el mercado cierra en < 30 min
+
+# ── Tabla de Capital por Interpolación Lineal ──────────────────────────────────
+# Puntos de referencia: (apuesta_ballena_usdc, nuestra_apuesta_usdc)
+# Para montos >$1000 se aplica: min(whale * 0.01, 27.0)
+_TIERED_TABLE = [
+    (1,    1.00),
+    (2,    1.20),
+    (10,   1.75),
+    (20,   3.00),
+    (50,   5.00),
+    (100,  7.50),
+    (200,  10.00),
+    (500,  12.00),
+    (1000, 15.00),
+]
+
+def interpolate_capital(raw_usdc: float) -> float:
+    """Devuelve el capital a invertir según la tabla de interpolación lineal por tramos."""
+    if raw_usdc <= 0:
+        return 0.0
+    if raw_usdc > 1000:
+        return round(min(raw_usdc * 0.01, 27.0), 2)
+    if raw_usdc <= _TIERED_TABLE[0][0]:
+        return _TIERED_TABLE[0][1]
+    for i in range(1, len(_TIERED_TABLE)):
+        x0, y0 = _TIERED_TABLE[i - 1]
+        x1, y1 = _TIERED_TABLE[i]
+        if raw_usdc <= x1:
+            t = (raw_usdc - x0) / (x1 - x0)
+            return round(y0 + t * (y1 - y0), 2)
+    return _TIERED_TABLE[-1][1]
 
 logger = logging.getLogger("copy_trader")
 
@@ -162,55 +194,32 @@ async def execute_copy_trade(signal: dict) -> dict:
     timestamp  = datetime.now(timezone.utc).isoformat()
     trade_id   = f"{market_id[:8]}_{int(datetime.now(timezone.utc).timestamp())}"
 
-    # Calcular capital: proporcional para shadow_mirror, fijo para el resto
+    # ── Calcular capital según tabla de interpolación ───────────────────────────
     if signal.get("signal_type") == "shadow_mirror":
         raw_usdc = float(signal.get("trade_size_usdc", 0))
 
-        # ── Sistema de Ratio por Tramos ────────────────────────────────────────
-        # Tramo 1 (< $1,000): ratio normal del perfil (default 1%)
-        # Tramo 2 (>= $1,000): ratio reducido 0.15% — protege capital ante cañonazos
-        HIGH_CONVICTION_THRESHOLD = 1000.0
-        HIGH_CONVICTION_RATIO     = 0.0015  # 0.15%
-        MIN_SIGNAL_USDC           = 50.0    # Umbral mínimo de señal válida
+        # Señal demasiado pequeña → ignorar
+        if raw_usdc < MIN_WHALE_USDC:
+            logger.info(f"⏭️ [SHADOW SKIP] Ballena apostó ${raw_usdc:.2f} < ${MIN_WHALE_USDC:.0f} mínimo. Ruido ignorado.")
+            return {
+                "trade_id": trade_id,
+                "status": "skipped",
+                "error": f"Dust signal (whale ${raw_usdc:.2f} < ${MIN_WHALE_USDC:.0f})",
+                "market_id": market_id
+            }
 
-        base_ratio = float(signal.get("copy_ratio", SHADOW_COPY_RATIO))
+        capital = interpolate_capital(raw_usdc)
 
-        if raw_usdc >= HIGH_CONVICTION_THRESHOLD:
-            ratio      = HIGH_CONVICTION_RATIO
-            tier_label = f"TRAMO ALTO (>=${HIGH_CONVICTION_THRESHOLD:.0f}$)"
-        else:
-            ratio      = base_ratio
-            tier_label = "TRAMO NORMAL"
-
-        capital   = round(raw_usdc * ratio, 2)
-        ratio_pct = round(ratio * 100, 3)
-
-        # ── Filtro de señales ──────────────────────────────────────────────────
+        # Aplicar suelo operativo Polymarket
         if capital < SHADOW_MIN_USDC:
-            if raw_usdc >= MIN_SIGNAL_USDC:
-                # Señal válida: la ballena apostó lo suficiente pero nuestra
-                # parte proporcional cae bajo el mínimo operativo.
-                # Entrar con el mínimo para no perder la señal.
-                capital = SHADOW_MIN_USDC
-                logger.info(
-                    f"[SHADOW] [⚡SEÑAL MÍNIMA] Ballena apostó ${raw_usdc:.2f} "
-                    f"→ proporcional ${capital:.2f} era polvo. "
-                    f"Entrando con mínimo ${SHADOW_MIN_USDC}"
-                )
-            else:
-                # Ruido puro: apuesta de ballena < $50, ignorar
-                logger.info(
-                    f"⏭️ [SHADOW SKIP] [{tier_label}] {ratio_pct}% de ${raw_usdc:.2f} "
-                    f"= ${round(raw_usdc * ratio, 2):.2f} USDC — ballena apostó < ${MIN_SIGNAL_USDC:.0f}$. Ruido ignorado."
-                )
-                return {
-                    "trade_id": trade_id,
-                    "status": "skipped",
-                    "error": f"Dust signal skipped (whale ${raw_usdc:.2f} < ${MIN_SIGNAL_USDC:.0f})",
-                    "market_id": market_id
-                }
+            capital = SHADOW_MIN_USDC
+
+        if raw_usdc > 1000:
+            tier_label = f"TRAMO ALTO (>{1000}$) → 1% cap $27"
         else:
-            logger.info(f"[SHADOW] [{tier_label}] Capital: {ratio_pct}% de ${raw_usdc:.2f} = ${capital:.2f} USDC")
+            tier_label = "INTERPOLADO"
+
+        logger.info(f"[SHADOW] [{tier_label}] Ballena: ${raw_usdc:.2f} → Nuestra apuesta: ${capital:.2f} USDC")
     else:
         capital = COPY_TRADE_USDC
 
