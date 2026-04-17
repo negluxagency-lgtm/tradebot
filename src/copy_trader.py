@@ -27,42 +27,24 @@ PROXY_ADDRESS         = os.getenv("POLYMARKET_PROXY_ADDRESS")
 COPY_TRADE_USDC       = float(os.getenv("COPY_TRADE_USDC", "100"))
 MAX_CONCURRENT        = int(os.getenv("MAX_CONCURRENT_POSITIONS", "8"))
 DRY_RUN               = os.getenv("DRY_RUN", "true").lower() == "true"
-SHADOW_COPY_RATIO     = float(os.getenv("SHADOW_COPY_RATIO", "0.01"))   # Ratio base (fallback)
-SHADOW_MIN_USDC       = float(os.getenv("SHADOW_MIN_USDC", "1.01"))    # Mínimo operativo Polymarket
-MIN_WHALE_USDC        = 10.0   # Apuesta mínima de la ballena para ser señal válida
+SHADOW_COPY_RATIO     = float(os.getenv("SHADOW_COPY_RATIO", "0.10"))  # 10% del trade objetivo
+SHADOW_MIN_USDC       = float(os.getenv("SHADOW_MIN_USDC", "1.0"))     # Minimo a ejecutar
 
 # Salvaguardas duras
+
 MAX_PRICE             = 0.85   # no copiar si el precio ya superó 0.85 USDC
 MIN_MINUTES_TO_CLOSE  = 30     # no copiar si el mercado cierra en < 30 min
 
-# ── Tabla de Capital por Interpolación Lineal ──────────────────────────────────
-# Puntos de referencia: (apuesta_ballena_usdc, nuestra_apuesta_usdc)
-# Para montos >$1000 se aplica: min(whale * 0.01, 27.0)
-_TIERED_TABLE = [
-    (10,   1.01),
-    (20,   2.00),
-    (50,   3.00),
-    (100,  5.00),
-    (200,  10.00),
-    (500,  12.00),
-    (1000, 15.00),
-]
+AGG_THRESHOLD_USDC = float(os.getenv("AGG_THRESHOLD_USDC", "100"))
+AGG_TIMEOUT_SEC = int(os.getenv("AGG_TIMEOUT_SEC", "180"))
+AGG_MAX_EXECS_PER_MIN = int(os.getenv("AGG_MAX_EXECS_PER_MIN", "5"))
+AGG_MAX_TRADE_USDC = float(os.getenv("AGG_MAX_TRADE_USDC", "5.0"))
+AGG_MAX_PORTFOLIO_EXPOSURE_PCT = float(os.getenv("AGG_MAX_PORTFOLIO_EXPOSURE_PCT", "50.0"))
+INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "269"))
 
-def interpolate_capital(raw_usdc: float) -> float:
-    """Devuelve el capital a invertir según la tabla de interpolación lineal por tramos."""
-    if raw_usdc <= 0:
-        return 0.0
-    if raw_usdc > 1000:
-        return round(min(raw_usdc * 0.01, 27.0), 2)
-    if raw_usdc <= _TIERED_TABLE[0][0]:
-        return _TIERED_TABLE[0][1]
-    for i in range(1, len(_TIERED_TABLE)):
-        x0, y0 = _TIERED_TABLE[i - 1]
-        x1, y1 = _TIERED_TABLE[i]
-        if raw_usdc <= x1:
-            t = (raw_usdc - x0) / (x1 - x0)
-            return round(y0 + t * (y1 - y0), 2)
-    return _TIERED_TABLE[-1][1]
+market_buffers: dict = {}
+execs_timestamps: list = []
+
 
 logger = logging.getLogger("copy_trader")
 
@@ -192,36 +174,13 @@ async def execute_copy_trade(signal: dict) -> dict:
     timestamp  = datetime.now(timezone.utc).isoformat()
     trade_id   = f"{market_id[:8]}_{int(datetime.now(timezone.utc).timestamp())}"
 
-    # ── Calcular capital según tabla de interpolación ───────────────────────────
-    if signal.get("signal_type") == "shadow_mirror":
-        raw_usdc = float(signal.get("trade_size_usdc", 0))
-
-        # Señal demasiado pequeña → ignorar
-        if raw_usdc < MIN_WHALE_USDC:
-            logger.info(f"⏭️ [SHADOW SKIP] Ballena apostó ${raw_usdc:.2f} < ${MIN_WHALE_USDC:.0f} mínimo. Ruido ignorado.")
-            return {
-                "trade_id": trade_id,
-                "status": "skipped",
-                "error": f"Dust signal (whale ${raw_usdc:.2f} < ${MIN_WHALE_USDC:.0f})",
-                "market_id": market_id
-            }
-
-        capital = interpolate_capital(raw_usdc)
-
-        # Aplicar suelo operativo Polymarket
-        if capital < SHADOW_MIN_USDC:
-            capital = SHADOW_MIN_USDC
-
-        if raw_usdc > 1000:
-            tier_label = f"TRAMO ALTO (>{1000}$) → 1% cap $27"
-        else:
-            tier_label = "INTERPOLADO"
-
-        logger.info(f"[SHADOW] [{tier_label}] Ballena: ${raw_usdc:.2f} → Nuestra apuesta: ${capital:.2f} USDC")
+    # Extracción del capital de Inyección del motor Aggregator 
+    if "_agg_capital_override_" in signal:
+        capital = signal["_agg_capital_override_"]
+        logger.info(f"[SHADOW] Capital Override (Aggregator): ${capital:.2f} USDC")
     else:
+        # Fallback de venta o señal legacy (usa el de .env)
         capital = COPY_TRADE_USDC
-
-
 
 
     # Cálculo inicial de shares basado en capital
@@ -418,18 +377,39 @@ async def auto_settle_loop():
             await asyncio.sleep(1.0)
 
 
+
+# ── Tareas de fondo ────────────────────────────────────────────────────────────
+
+async def buffer_reaper_loop():
+    """Limpia los buffers de agregación que han excedido el timeout de inactividad."""
+    while True:
+        await asyncio.sleep(10)
+        now = datetime.now(timezone.utc).timestamp()
+        expired = []
+        for mid, b in list(market_buffers.items()):
+            if now - b["last_update"] > AGG_TIMEOUT_SEC:
+                expired.append(mid)
+        for mid in expired:
+            logger.info(f"🧹 [AGG TIMEOUT] Expurgando buffer inactivo para {mid[:8]}")
+            market_buffers.pop(mid, None)
+
+def clean_execs_rate_limit():
+    """Limpia el histórico de rate limit."""
+    global execs_timestamps
+    now = datetime.now(timezone.utc).timestamp()
+    execs_timestamps = [ts for ts in execs_timestamps if now - ts < 60]
+
 # ── Proceso principal ──────────────────────────────────────────────────────────
 async def run_copy_trader(signal_queue: asyncio.Queue):
     """
-    Loop que consume señales de la cola del scanner y aplica salvaguardas
-    antes de decidir si ejecutar el copy trade.
+    Loop que consume señales de la cola del scanner y las procesa mediante el
+    motor de agregación por intención.
     """
     load_open_positions()
-    logger.info(f"🏦 Copy Trader activo | Modo: {'DRY RUN 🟡' if DRY_RUN else 'LIVE 🟢'} | "
-                f"Capital por trade: ${COPY_TRADE_USDC}")
+    logger.info(f"🏦 Copy Trader (v3.0 Aggregation) activo | Modo: {'DRY RUN 🟡' if DRY_RUN else 'LIVE 🟢'}")
 
-    # Arrancar el tracker de cierre automático en background
     asyncio.create_task(auto_settle_loop())
+    asyncio.create_task(buffer_reaper_loop())
 
     while True:
         try:
@@ -440,17 +420,88 @@ async def run_copy_trader(signal_queue: asyncio.Queue):
         market_id = signal["market_id"]
         price     = signal["price"]
         side      = signal.get("side", "BUY")
+        outcome   = signal.get("outcome", "UNKNOWN")
+        raw_usdc  = float(signal.get("trade_size_usdc", 0))
 
-        logger.info(f"📨 Señal recibida: {signal['market_name'][:50]} | "
-                    f"{side} | {signal.get('signal_type', 'shadow')} | ${signal.get('trade_size_usdc', 0):,.0f}")
-
-        # ── Ejecutar ABSOLUTAMENTE TODAS las señales (excepto Dust trades que fueron skipped antes en copy_trader) ──
+        # Procesar SELL si es para cerrar posición. (Bypass de agregación)
         if side == "SELL":
             has_positions = any(p.get("market_id") == market_id for p in open_positions.values())
             if not has_positions:
-                logger.info(f"⏭️ Skip (Venta): No hay posición abierta para cerrar en {market_id}")
+                continue
+            position = await execute_copy_trade(signal)
+            logger.info(f"☑️ Posición cerrada por SELL manual: {position.get('trade_id', '?')}")
+            continue
+
+        if raw_usdc <= 0:
+            continue
+
+        ts_now = datetime.now(timezone.utc).timestamp()
+
+        # Iniciar o recuperar buffer
+        if market_id not in market_buffers:
+            market_buffers[market_id] = {
+                "outcome": outcome,
+                "total_usdc": 0.0,
+                "trade_count": 0,
+                "last_update": ts_now
+            }
+
+        buf = market_buffers[market_id]
+
+        # Si cambió la dirección dominante, reseteamos porque no hay consistencia
+        if buf["outcome"] != outcome:
+            logger.info(f"🔄 [AGG OVERRIDE] Cambio direccional en {market_id[:8]}: {buf['outcome']} -> {outcome}. Reseteando buffer.")
+            buf["outcome"] = outcome
+            buf["total_usdc"] = 0.0
+            buf["trade_count"] = 0
+
+        # Acumular volumen
+        buf["total_usdc"] += raw_usdc
+        buf["trade_count"] += 1
+        buf["last_update"] = ts_now
+
+        logger.info(f"💧 [AGG UPDATE] {market_id[:8]} ({outcome}) | Acumulado: ${buf['total_usdc']:.0f} (Threshold: {AGG_THRESHOLD_USDC}) | Trades: {buf['trade_count']}")
+
+        # Disparador de Ejecución
+        if buf["total_usdc"] >= AGG_THRESHOLD_USDC:
+            
+            # Filtro Frecuencia
+            clean_execs_rate_limit()
+            if len(execs_timestamps) >= AGG_MAX_EXECS_PER_MIN:
+                logger.warning(f"⏳ [AGG SKIP] Rate limit excedido ({AGG_MAX_EXECS_PER_MIN}/min). Trade pospuesto.")
+                continue
+                
+            # Filtro de Exposición Total
+            total_invested = sum([float(p.get("copy_trade_usdc", 0)) for p in open_positions.values()])
+            max_allowed = INITIAL_CAPITAL * (AGG_MAX_PORTFOLIO_EXPOSURE_PCT / 100.0)
+            if total_invested >= max_allowed:
+                logger.warning(f"🛡️ [AGG SKIP] Exposición máxima de portfolio alcanzada: ${total_invested:.2f} >= ${max_allowed:.2f}.")
                 continue
 
-        # ── Ejecutar ───────────────────────────────────────────────────────────
-        position = await execute_copy_trade(signal)
-        logger.info(f"📋 Posición registrada: {position['trade_id']} | Status: {position['status']}")
+            # Calcular tamaño de inversión (ej. 1% del volumen total que disparó la operación)
+            ratio = float(signal.get("copy_ratio", SHADOW_COPY_RATIO))
+            capital = round(buf["total_usdc"] * ratio, 2)
+            
+            # Min/Max boundaries
+            if capital < SHADOW_MIN_USDC:
+                capital = SHADOW_MIN_USDC
+                
+            if capital > AGG_MAX_TRADE_USDC:
+                capital = AGG_MAX_TRADE_USDC
+            
+            logger.info(f"🎯 [AGG TRIGGER] ¡Intención validada! Ejecutando señal en {market_id[:8]} por ${capital:.2f} USDC.")
+
+            # Limpiar buffer tras disparar
+            del market_buffers[market_id]
+
+            # Inyectar el capital sobreescrito en la señal para que execute_copy_trade no recalcule
+            signal["_agg_capital_override_"] = capital
+
+            # Registrar marca temporal para el rate limit
+            execs_timestamps.append(datetime.now(timezone.utc).timestamp())
+
+            # Ejecutar
+            position = await execute_copy_trade(signal)
+            logger.info(f"📋 Ejecución AGG: {position.get('trade_id', '?')} | Status: {position.get('status', 'failed')}")
+
+
