@@ -415,7 +415,7 @@ async def send_dashboard_summary(profiles: list, bot_token: str = None, chat_id:
     except Exception:
         all_data = []
 
-    msg = f"📊 *FLOTA SHADOW — REPORTE CONSOLIDADO* ({mode_tag})\n"
+    msg = f"📊 *FLOTA ACTUAL* ({mode_tag})\n"
     msg += f"─────────────────────\n"
 
     total_en_juego  = 0.0
@@ -455,13 +455,8 @@ async def send_dashboard_summary(profiles: list, bot_token: str = None, chat_id:
     
     msg += (
         f"\n─────────────────────\n"
-        f"🌐 *TOTALES FLOTA*\n"
-        f"  💰 En juego: `${total_en_juego:.2f}`\n"
-        f"  🎲 Total jugado: `${total_jugado:.2f}`\n"
-        f"  📈 *Beneficio Total (Suma Bots):* `{total_sign}{total_pnl:.2f}`\n\n"
-        f"🏦 *BALANCE DE CUENTA*\n"
-        f"  💵 Wallet Saldo: `${balance_usdc:.2f}`\n"
-        f"  📊 Portfolio Actual: `${total_portfolio:.2f}`\n"
+        f"🌐 *Beneficio Total*\n"
+        f"  📈 *Beneficio Total:* `{total_sign}{total_pnl:.2f}`\n\n"
         f"─────────────────────\n"
         f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
     )
@@ -479,6 +474,18 @@ async def send_dashboard_summary(profiles: list, bot_token: str = None, chat_id:
     except Exception as e:
         logger.error(f"❌ Excepción en send_dashboard_summary: {e}")
 
+
+
+async def auto_dashboard_loop(profiles: list, bot_token: str = None, chat_id: str = None):
+    """Envía el reporte del dashboard periódicamente (10 minutos)."""
+    await asyncio.sleep(10) # start un poco después
+    while True:
+        try:
+            logger.info("📤 Enviando reporte automático de dashboard (cada 10 min)...")
+            await send_dashboard_summary(profiles, bot_token, chat_id)
+        except Exception as e:
+            logger.error(f"Error en auto_dashboard_loop: {e}")
+        await asyncio.sleep(600)  # 10 min
 
 async def dashboard_listener_loop(profiles: list, bot_token: str = None, chat_id: str = None):
     """

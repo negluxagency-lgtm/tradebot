@@ -479,6 +479,18 @@ def clean_execs_rate_limit():
     execs_timestamps = [ts for ts in execs_timestamps if now - ts < 60]
 
 # ── Proceso principal ──────────────────────────────────────────────────────────
+
+def get_current_portfolio_value() -> float:
+    """Calcula el P/L total cerrado y lo suma al INITIAL_CAPITAL para saber si estamos arruinados."""
+    try:
+        if not os.path.exists(pnl_log_path): return INITIAL_CAPITAL
+        with open(pnl_log_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            total_pnl = sum(float(p.get("pnl_usdc", 0) or 0) for p in data if p.get("status") in ["closed", "closed_tp", "closed_sl"])
+            return INITIAL_CAPITAL + total_pnl
+    except Exception:
+        return INITIAL_CAPITAL
+
 async def run_copy_trader(signal_queue: asyncio.Queue):
     """
     Loop que consume señales de la cola del scanner y las procesa mediante el
@@ -544,6 +556,13 @@ async def run_copy_trader(signal_queue: asyncio.Queue):
         # Disparador de Ejecución
         if buf["total_usdc"] >= AGG_THRESHOLD_USDC:
             
+            # --- CIRCUIT BREAKER DE SALDO ---
+            current_account_value = get_current_portfolio_value()
+            if current_account_value <= 25.0:
+                logger.error(f"🛑 [CIRCUIT BREAKER] SALDO CRÍTICO: ${current_account_value:.2f}. Bot detenido para prevención de pérdidas (<= $25).")
+                await asyncio.sleep(60) # Pausa larga para no saturar logs
+                continue
+
             # Filtro Frecuencia
             clean_execs_rate_limit()
             if len(execs_timestamps) >= AGG_MAX_EXECS_PER_MIN:

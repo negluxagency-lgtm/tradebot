@@ -218,6 +218,7 @@ async def main():
     dash_chat  = os.getenv("DASHBOARD_CHAT_ID")
     if dash_token and dash_chat and dash_token != "TU_DASHBOARD_BOT_TOKEN_AQUI":
         tasks.append(dashboard_listener_loop(profiles, bot_token=dash_token, chat_id=dash_chat))
+        tasks.append(auto_dashboard_loop(profiles, bot_token=dash_token, chat_id=dash_chat))
         logger.info(f"📊 Dashboard Bot activo. Escribe al bot de control para ver el reporte de flota.")
     else:
         logger.warning("⚠️  DASHBOARD_BOT_TOKEN no configurado. Listener de control offline.")
