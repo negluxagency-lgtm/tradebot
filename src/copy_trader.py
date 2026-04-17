@@ -171,32 +171,49 @@ async def execute_copy_trade(signal: dict) -> dict:
         # Tramo 2 (>= $1,000): ratio reducido 0.15% — protege capital ante cañonazos
         HIGH_CONVICTION_THRESHOLD = 1000.0
         HIGH_CONVICTION_RATIO     = 0.0015  # 0.15%
+        MIN_SIGNAL_USDC           = 50.0    # Umbral mínimo de señal válida
 
         base_ratio = float(signal.get("copy_ratio", SHADOW_COPY_RATIO))
 
         if raw_usdc >= HIGH_CONVICTION_THRESHOLD:
-            ratio     = HIGH_CONVICTION_RATIO
+            ratio      = HIGH_CONVICTION_RATIO
             tier_label = f"TRAMO ALTO (>=${HIGH_CONVICTION_THRESHOLD:.0f}$)"
         else:
-            ratio     = base_ratio
+            ratio      = base_ratio
             tier_label = "TRAMO NORMAL"
 
         capital   = round(raw_usdc * ratio, 2)
         ratio_pct = round(ratio * 100, 3)
 
-        # Filtro de Convicción Mínima
+        # ── Filtro de señales ──────────────────────────────────────────────────
         if capital < SHADOW_MIN_USDC:
-            logger.info(f"⏭️ [SHADOW SKIP] [{tier_label}] {ratio_pct}% de ${raw_usdc:.2f} = ${capital:.2f} USDC (menor que el mínimo ${SHADOW_MIN_USDC}). Evitando ruido.")
-            return {
-                "trade_id": trade_id,
-                "status": "skipped",
-                "error": f"Dust trade skipped (${capital:.2f} < ${SHADOW_MIN_USDC})",
-                "market_id": market_id
-            }
-
-        logger.info(f"[SHADOW] [{tier_label}] Capital: {ratio_pct}% de ${raw_usdc:.2f} = ${capital:.2f} USDC")
+            if raw_usdc >= MIN_SIGNAL_USDC:
+                # Señal válida: la ballena apostó lo suficiente pero nuestra
+                # parte proporcional cae bajo el mínimo operativo.
+                # Entrar con el mínimo para no perder la señal.
+                capital = SHADOW_MIN_USDC
+                logger.info(
+                    f"[SHADOW] [⚡SEÑAL MÍNIMA] Ballena apostó ${raw_usdc:.2f} "
+                    f"→ proporcional ${capital:.2f} era polvo. "
+                    f"Entrando con mínimo ${SHADOW_MIN_USDC}"
+                )
+            else:
+                # Ruido puro: apuesta de ballena < $50, ignorar
+                logger.info(
+                    f"⏭️ [SHADOW SKIP] [{tier_label}] {ratio_pct}% de ${raw_usdc:.2f} "
+                    f"= ${round(raw_usdc * ratio, 2):.2f} USDC — ballena apostó < ${MIN_SIGNAL_USDC:.0f}$. Ruido ignorado."
+                )
+                return {
+                    "trade_id": trade_id,
+                    "status": "skipped",
+                    "error": f"Dust signal skipped (whale ${raw_usdc:.2f} < ${MIN_SIGNAL_USDC:.0f})",
+                    "market_id": market_id
+                }
+        else:
+            logger.info(f"[SHADOW] [{tier_label}] Capital: {ratio_pct}% de ${raw_usdc:.2f} = ${capital:.2f} USDC")
     else:
         capital = COPY_TRADE_USDC
+
 
 
 
