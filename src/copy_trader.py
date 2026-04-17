@@ -39,8 +39,13 @@ AGG_THRESHOLD_USDC = float(os.getenv("AGG_THRESHOLD_USDC", "100"))
 AGG_TIMEOUT_SEC = int(os.getenv("AGG_TIMEOUT_SEC", "180"))
 AGG_MAX_EXECS_PER_MIN = int(os.getenv("AGG_MAX_EXECS_PER_MIN", "5"))
 AGG_MAX_TRADE_USDC = float(os.getenv("AGG_MAX_TRADE_USDC", "5.0"))
+
 AGG_MAX_PORTFOLIO_EXPOSURE_PCT = float(os.getenv("AGG_MAX_PORTFOLIO_EXPOSURE_PCT", "50.0"))
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "269"))
+
+AUTO_TAKE_PROFIT_PCT = float(os.getenv("AUTO_TAKE_PROFIT_PCT", "40.0")) / 100.0
+AUTO_STOP_LOSS_PCT = float(os.getenv("AUTO_STOP_LOSS_PCT", "50.0")) / 100.0
+
 
 market_buffers: dict = {}
 execs_timestamps: list = []
@@ -309,6 +314,80 @@ async def execute_copy_trade(signal: dict) -> dict:
     return position
 
 
+
+async def auto_exit_loop():
+    """
+    Robot Francotirador de Ventas (Take-Profit & Stop-Loss).
+    Revisa el precio actual cada 15 segundos y gatilla un SELL si el ROI
+    alcanza los márgenes configurados.
+    """
+    await asyncio.sleep(5)  # Espera antes de arrancar
+    while True:
+        await asyncio.sleep(15)
+        
+        # Iterar sobre las posiciones existentes
+        for trade_id, pos in list(open_positions.items()):
+            market_id = pos.get("market_id")
+            if not market_id or pos.get("status") != "open":
+                continue
+                
+            entry_price = float(pos.get("entry_price", 0.0))
+            if entry_price <= 0:
+                continue
+
+            try:
+                # Consultamos Gamma API de forma ligera (podríamos usar CLOB, pero la gamma no requiere balance/sigs y es REST)
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"https://gamma-api.polymarket.com/markets/{market_id}",
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    ) as resp:
+                        if resp.status == 200:
+                            m = await resp.json()
+                            if m.get("closed", False):
+                                continue # Lo maneja el auto_settle_loop
+                                
+                            tokens = m.get("tokens", [])
+                            target_outcome = pos.get("outcome")
+                            
+                            c_price = None
+                            for token in tokens:
+                                if token.get("outcome") == target_outcome:
+                                    c_price = float(token.get("price", 0.0))
+                                    break
+                            
+                            if c_price is not None and c_price > 0:
+                                roi = (c_price - entry_price) / entry_price
+                                
+                                trigger_sell = False
+                                sell_reason = ""
+                                
+                                if roi >= AUTO_TAKE_PROFIT_PCT or c_price >= 0.95:
+                                    trigger_sell = True
+                                    sell_reason = f"TAKE PROFIT (+{roi*100:.1f}%)"
+                                elif roi <= -AUTO_STOP_LOSS_PCT:
+                                    trigger_sell = True
+                                    sell_reason = f"STOP LOSS ({roi*100:.1f}%)"
+                                
+                                if trigger_sell:
+                                    logger.warning(f"🚨 [AUTO-EXIT] {sell_reason} disparado en {market_id[:8]}! C_Price: {c_price:.2f} (Entry: {entry_price:.2f})")
+                                    # Formar señal sintética de SELL
+                                    exit_signal = {
+                                        "market_id": market_id,
+                                        "market_name": pos.get("market_name", "UNKNOWN"),
+                                        "asset_id": pos.get("asset_id"),
+                                        "outcome": target_outcome,
+                                        "side": "SELL",
+                                        "price": c_price, # Manda al Clob el peor caso de mercado o el precio mid actual
+                                        "trade_size_usdc": 0,
+                                        "signal_type": "auto_exit"
+                                    }
+                                    
+                                    # Llamar al ejecutor (que calculará automaticamente si es SELL el aggregate)
+                                    asyncio.create_task(execute_copy_trade(exit_signal))
+            except Exception as e:
+                logger.error(f"[AUTO-EXIT] Error revisando mercado {market_id[:8]}: {e}")
+
 async def auto_settle_loop():
     """
     Revisa periódicamente los mercados abiertos en disco.
@@ -410,6 +489,7 @@ async def run_copy_trader(signal_queue: asyncio.Queue):
 
     asyncio.create_task(auto_settle_loop())
     asyncio.create_task(buffer_reaper_loop())
+    asyncio.create_task(auto_exit_loop())
 
     while True:
         try:
@@ -428,8 +508,7 @@ async def run_copy_trader(signal_queue: asyncio.Queue):
             has_positions = any(p.get("market_id") == market_id for p in open_positions.values())
             if not has_positions:
                 continue
-            position = await execute_copy_trade(signal)
-            logger.info(f"☑️ Posición cerrada por SELL manual: {position.get('trade_id', '?')}")
+            asyncio.create_task(execute_copy_trade(signal))
             continue
 
         if raw_usdc <= 0:
