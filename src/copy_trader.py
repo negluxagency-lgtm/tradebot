@@ -55,19 +55,21 @@ except Exception as e:
 
 
 # ── Estado de posiciones ───────────────────────────────────────────────────────
-open_positions: dict[str, dict] = {}  # market_id → posición abierta
+open_positions: dict[str, dict] = {}  # trade_id → posición abierta
 pnl_log_path = "artifacts/copy_trade_pnl.json"
 
 
 def load_open_positions():
     """Carga posiciones abiertas desde disco (idempotente al reiniciar)."""
+    global open_positions
+    open_positions = {}
     try:
         if os.path.exists(pnl_log_path):
             with open(pnl_log_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 for entry in data:
                     if entry.get("status") == "open":
-                        open_positions[entry["market_id"]] = entry
+                        open_positions[entry.get("trade_id")] = entry
         logger.info(f"📂 {len(open_positions)} posiciones abiertas cargadas desde disco.")
     except Exception as e:
         logger.warning(f"No se pudo cargar el historial de posiciones: {e}")
@@ -237,16 +239,25 @@ async def execute_copy_trade(signal: dict) -> dict:
             f"${COPY_TRADE_USDC} | {signal['market_name'][:50]}"
         )
         if side == "BUY":
-            open_positions[market_id] = position
-        elif side == "SELL" and market_id in open_positions:
-            # Lógica simple de cierre
-            prev = open_positions.pop(market_id)
-            position["status"] = "closed"
-            position["entry_price"] = prev["entry_price"]
-            position["exit_price"] = price
-            position["pnl_usdc"] = (price - prev["entry_price"]) * prev["size_shares"]
+            open_positions[trade_id] = position
+        elif side == "SELL":
+            # Lógica simple de cierre para todas las posiciones de este mercado
+            to_close = [tid for tid, p in open_positions.items() if p.get("market_id") == market_id]
+            for tid in to_close:
+                prev = open_positions.pop(tid)
+                pos_close = prev.copy()
+                pos_close["status"] = "closed"
+                pos_close["exit_price"] = price
+                pos_close["exit_timestamp"] = timestamp
+                pos_close["pnl_usdc"] = (price - prev["entry_price"]) * prev["size_shares"]
+                logger.info(f"Cerrando posición simulada {tid} con PnL: ${pos_close['pnl_usdc']:.2f}")
+                save_position(pos_close)
+            
+            if not to_close:
+                position["status"] = "failed"
+                position["error"] = "No open positions found to close"
         
-        save_position(position)
+        save_position(position) if side == "BUY" else None
         return position
 
     # ── Ejecución Real ─────────────────────────────────────────────────────────
@@ -271,9 +282,18 @@ async def execute_copy_trade(signal: dict) -> dict:
         if resp and resp.get("success"):
             position["order_id"] = resp.get("orderID", "unknown")
             logger.info(f"✅ Orden {side} ejecutada: {position['order_id']}")
-            if side == "SELL" and market_id in open_positions:
-                 open_positions.pop(market_id)
-                 position["status"] = "closed"
+            if side == "SELL":
+                to_close = [tid for tid, p in open_positions.items() if p.get("market_id") == market_id]
+                for tid in to_close:
+                    prev = open_positions.pop(tid)
+                    pos_close = prev.copy()
+                    pos_close["status"] = "closed"
+                    pos_close["exit_price"] = price
+                    pos_close["exit_timestamp"] = timestamp
+                    pos_close["pnl_usdc"] = (price - prev["entry_price"]) * prev["size_shares"]
+                    logger.info(f"Cerrando posición {tid} en API Live con PnL: ${pos_close['pnl_usdc']:.2f}")
+                    save_position(pos_close)
+                position["status"] = "closed" if to_close else "failed"
         else:
             logger.error(f"❌ Error en orden {side}: {resp}")
             position["status"] = "failed"
@@ -284,9 +304,9 @@ async def execute_copy_trade(signal: dict) -> dict:
         position["error"]  = str(e)
 
     if side == "BUY" and position["status"] != "failed":
-        open_positions[market_id] = position
+        open_positions[trade_id] = position
     
-    save_position(position)
+    save_position(position) if side == "BUY" else None
     return position
 
 
@@ -300,9 +320,9 @@ async def auto_settle_loop():
         await asyncio.sleep(60 * 5)  # Cada 5 minutos
         logger.info("🔄 Verificando resolución automática de mercados (Settlement)...")
         
-        for market_id in list(open_positions.keys()):
-            pos = open_positions.get(market_id)
-            if not pos or pos.get("status") != "open":
+        for trade_id, pos in list(open_positions.items()):
+            market_id = pos.get("market_id")
+            if not market_id or pos.get("status") != "open":
                 continue
                 
             try:
@@ -349,7 +369,7 @@ async def auto_settle_loop():
                                     exit_usdc = shares * final_price
                                     pos["pnl_usdc"] = exit_usdc - entry_usdc
                                     
-                                    open_positions.pop(market_id, None)
+                                    open_positions.pop(trade_id, None)
                                     save_position(pos)
                                     logger.info(f"✅ [SETTLEMENT] Mercado resuelto: {pos['market_name'][:40]} | Outcome final: {final_price:.2f} | P/L: ${pos['pnl_usdc']:+.2f} USDC")
             except Exception as e:
@@ -384,31 +404,10 @@ async def run_copy_trader(signal_queue: asyncio.Queue):
         logger.info(f"📨 Señal recibida: {signal['market_name'][:50]} | "
                     f"{side} | {signal.get('signal_type', 'shadow')} | ${signal.get('trade_size_usdc', 0):,.0f}")
 
-        # ── Aplicar salvaguardas en orden de menor a mayor costo (Solo para compras) ──
-        if side == "BUY":
-            ok, reason = check_duplicate_position(market_id)
-            if not ok:
-                logger.info(f"⏭️ Skip (Duplicado): {reason}")
-                continue
-
-            ok, reason = check_concurrent_guard()
-            if not ok:
-                logger.info(f"⏭️ Skip (Concurrencia): {reason}")
-                continue
-
-            ok, reason = check_price_guard(price)
-            if not ok:
-                logger.info(f"⏭️ Skip (Precio): {reason}")
-                continue
-
-            ok, reason = await check_market_timing(market_id)
-            if not ok:
-                logger.info(f"⏭️ Skip (Timing): {reason}")
-                continue
-        
-        # Para ventas (SELL), no aplicamos salvaguardas de entrada, solo ejecutamos si hay posición
-        elif side == "SELL":
-            if market_id not in open_positions:
+        # ── Ejecutar ABSOLUTAMENTE TODAS las señales (excepto Dust trades que fueron skipped antes en copy_trader) ──
+        if side == "SELL":
+            has_positions = any(p.get("market_id") == market_id for p in open_positions.values())
+            if not has_positions:
                 logger.info(f"⏭️ Skip (Venta): No hay posición abierta para cerrar en {market_id}")
                 continue
 
