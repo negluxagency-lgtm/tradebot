@@ -33,3 +33,4 @@ Implementar un sistema de "espejo" (Mirror Trading) de alta fidelidad que rastre
 |-------|----------------|-------------------|
 | 2026-04-14 | Inicialización de Directiva | N/A |
 | 2026-04-16 | Drawdown de -$500 con ratio 10% | Reducción drástica del ratio a 1% (`SHADOW_COPY_RATIO=0.01`) y pivot a "Bots Tácticos" de coste cero para protección orbital del bankroll. |
+| 2026-04-19 | Suspensión de seguimiento de objetivo 0x3a... | Perfil 3 (`0x3a847382ad6fff9be1db4e073fd9b869f6884d44`) desactivado en `.env.local` por orden directa. |

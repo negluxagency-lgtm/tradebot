@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.8",
+    "@polymarket/builder-signing-sdk": "^1.0.0",
+    "axios": "^1.15.2",
+    "dotenv": "^17.4.2",
+    "viem": "^2.48.4"
+  }
+}

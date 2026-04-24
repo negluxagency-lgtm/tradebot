@@ -1,5 +1,12 @@
 import requests
+import sys
+import io
 from supabase_engine import SUPABASE_URL, SUPABASE_KEY, get_supabase_headers
+
+# Fix para codificación Unicode en terminales Windows
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
 
 def reset_database():
     print("🧹 Iniciando protocolo de limpieza de base de datos...")

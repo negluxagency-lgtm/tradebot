@@ -32,19 +32,52 @@ SHADOW_MIN_USDC       = float(os.getenv("SHADOW_MIN_USDC", "1.0"))     # Minimo 
 
 # Salvaguardas duras
 
-MAX_PRICE             = 0.85   # no copiar si el precio ya superó 0.85 USDC
-MIN_MINUTES_TO_CLOSE  = 30     # no copiar si el mercado cierra en < 30 min
+MAX_PRICE             = float(os.getenv("MAX_PRICE_GUARD", "0.85"))
+MIN_MINUTES_TO_CLOSE  = int(os.getenv("MIN_MINUTES_TO_CLOSE", "30"))
 
 AGG_THRESHOLD_USDC = float(os.getenv("AGG_THRESHOLD_USDC", "100"))
 AGG_TIMEOUT_SEC = int(os.getenv("AGG_TIMEOUT_SEC", "180"))
 AGG_MAX_EXECS_PER_MIN = int(os.getenv("AGG_MAX_EXECS_PER_MIN", "5"))
-AGG_MAX_TRADE_USDC = float(os.getenv("AGG_MAX_TRADE_USDC", "5.0"))
+AGG_MAX_TRADE_USDC = float(os.getenv("AGG_MAX_TRADE_USDC", "5.0"))  # Legacy, ahora como fallback
 
 AGG_MAX_PORTFOLIO_EXPOSURE_PCT = float(os.getenv("AGG_MAX_PORTFOLIO_EXPOSURE_PCT", "50.0"))
 INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "269"))
 
 AUTO_TAKE_PROFIT_PCT = float(os.getenv("AUTO_TAKE_PROFIT_PCT", "40.0")) / 100.0
 AUTO_STOP_LOSS_PCT = float(os.getenv("AUTO_STOP_LOSS_PCT", "50.0")) / 100.0
+
+# ── Piecewise Linear Sizing (v4.0) ─────────────────────────────────────────────
+# Curva de sizing: mapea el volumen del objetivo a nuestra inversión.
+# Formato: (whale_usdc, our_usdc)
+_PIECEWISE_BREAKPOINTS = [
+    (1,    1),
+    (10,   7),
+    (20,   16),
+    (50,   30),
+    (100,  70),
+    (500,  200),
+    (1000, 400),
+    (2000, 600),
+]
+
+def piecewise_copy_size(whale_usdc: float) -> float:
+    """
+    Calcula nuestra inversión usando interpolación lineal por tramos.
+    Por encima de $2000 se aplica un 20% fijo.
+    """
+    if whale_usdc <= 0:
+        return 0.0
+    if whale_usdc < _PIECEWISE_BREAKPOINTS[0][0]:
+        return whale_usdc  # 1:1 para micro-importes
+    if whale_usdc > 2000:
+        return round(whale_usdc * 0.20, 2)
+    for i in range(len(_PIECEWISE_BREAKPOINTS) - 1):
+        x0, y0 = _PIECEWISE_BREAKPOINTS[i]
+        x1, y1 = _PIECEWISE_BREAKPOINTS[i + 1]
+        if x0 <= whale_usdc <= x1:
+            t = (whale_usdc - x0) / (x1 - x0)
+            return round(y0 + t * (y1 - y0), 2)
+    return _PIECEWISE_BREAKPOINTS[-1][1]
 
 
 market_buffers: dict = {}
@@ -198,10 +231,10 @@ async def execute_copy_trade(signal: dict) -> dict:
             min_shares = float(book.get("min_order_size", 0))
             if min_shares > 0 and size_shares < min_shares:
                 required_capital = round(min_shares * price, 2)
-                if required_capital > 7.0:
+                if required_capital > 50.0:
                     logger.warning(
                         f"⚠️ ABORTO: Mínimo de mercado ({min_shares} shares) requiere ${required_capital:.2f}, "
-                        f"que supera el tope de $7.00. Mercado: {market_id}"
+                        f"que supera el tope de $50.00. Mercado: {market_id}"
                     )
                     return {
                         "status": "failed",
@@ -515,7 +548,7 @@ async def run_copy_trader(signal_queue: asyncio.Queue):
         outcome   = signal.get("outcome", "UNKNOWN")
         raw_usdc  = float(signal.get("trade_size_usdc", 0))
 
-        # Procesar SELL si es para cerrar posición. (Bypass de agregación)
+        # ── SELLs: Bypass directo para cerrar posición ───────────────────────
         if side == "SELL":
             has_positions = any(p.get("market_id") == market_id for p in open_positions.values())
             if not has_positions:
@@ -526,80 +559,49 @@ async def run_copy_trader(signal_queue: asyncio.Queue):
         if raw_usdc <= 0:
             continue
 
-        ts_now = datetime.now(timezone.utc).timestamp()
+        # ── CIRCUIT BREAKER DE SALDO ──────────────────────────────────────────
+        current_account_value = get_current_portfolio_value()
+        if current_account_value <= 150.0:
+            logger.error(f"🛑 [CIRCUIT BREAKER] SALDO CRÍTICO: ${current_account_value:.2f}. Bot detenido (<= $150).")
+            await asyncio.sleep(60)
+            continue
 
-        # Iniciar o recuperar buffer
-        if market_id not in market_buffers:
-            market_buffers[market_id] = {
-                "outcome": outcome,
-                "total_usdc": 0.0,
-                "trade_count": 0,
-                "last_update": ts_now
-            }
-
-        buf = market_buffers[market_id]
-
-        # Si cambió la dirección dominante, reseteamos porque no hay consistencia
-        if buf["outcome"] != outcome:
-            logger.info(f"🔄 [AGG OVERRIDE] Cambio direccional en {market_id[:8]}: {buf['outcome']} -> {outcome}. Reseteando buffer.")
-            buf["outcome"] = outcome
-            buf["total_usdc"] = 0.0
-            buf["trade_count"] = 0
-
-        # Acumular volumen
-        buf["total_usdc"] += raw_usdc
-        buf["trade_count"] += 1
-        buf["last_update"] = ts_now
-
-        logger.info(f"💧 [AGG UPDATE] {market_id[:8]} ({outcome}) | Acumulado: ${buf['total_usdc']:.0f} (Threshold: {AGG_THRESHOLD_USDC}) | Trades: {buf['trade_count']}")
-
-        # Disparador de Ejecución
-        if buf["total_usdc"] >= AGG_THRESHOLD_USDC:
+        # ── Rate limit de ejecución ───────────────────────────────────────────
+        clean_execs_rate_limit()
+        if len(execs_timestamps) >= AGG_MAX_EXECS_PER_MIN:
+            logger.warning(f"⏳ [SKIP] Rate limit excedido ({AGG_MAX_EXECS_PER_MIN}/min). Trade omitido.")
+            continue
             
-            # --- CIRCUIT BREAKER DE SALDO ---
-            current_account_value = get_current_portfolio_value()
-            if current_account_value <= 25.0:
-                logger.error(f"🛑 [CIRCUIT BREAKER] SALDO CRÍTICO: ${current_account_value:.2f}. Bot detenido para prevención de pérdidas (<= $25).")
-                await asyncio.sleep(60) # Pausa larga para no saturar logs
-                continue
+        # ── Filtro de Exposición Total ────────────────────────────────────────
+        total_invested = sum([float(p.get("copy_trade_usdc", 0)) for p in open_positions.values()])
+        max_allowed = INITIAL_CAPITAL * (AGG_MAX_PORTFOLIO_EXPOSURE_PCT / 100.0)
+        if total_invested >= max_allowed:
+            logger.warning(f"🛡️ [SKIP] Exposición máxima alcanzada: ${total_invested:.2f} >= ${max_allowed:.2f}.")
+            continue
 
-            # Filtro Frecuencia
-            clean_execs_rate_limit()
-            if len(execs_timestamps) >= AGG_MAX_EXECS_PER_MIN:
-                logger.warning(f"⏳ [AGG SKIP] Rate limit excedido ({AGG_MAX_EXECS_PER_MIN}/min). Trade pospuesto.")
-                continue
-                
-            # Filtro de Exposición Total
-            total_invested = sum([float(p.get("copy_trade_usdc", 0)) for p in open_positions.values()])
-            max_allowed = INITIAL_CAPITAL * (AGG_MAX_PORTFOLIO_EXPOSURE_PCT / 100.0)
-            if total_invested >= max_allowed:
-                logger.warning(f"🛡️ [AGG SKIP] Exposición máxima de portfolio alcanzada: ${total_invested:.2f} >= ${max_allowed:.2f}.")
-                continue
+        # ── Piecewise Linear Sizing v4.0 ──────────────────────────────────────
+        # Ahora el sizing se aplica sobre el tamaño INDIVIDUAL de cada operación
+        # detectada, sin esperar a acumular volumen (Mirror Trading puro).
+        capital = piecewise_copy_size(raw_usdc)
 
-            # Calcular tamaño de inversión (ej. 1% del volumen total que disparó la operación)
-            ratio = float(signal.get("copy_ratio", SHADOW_COPY_RATIO))
-            capital = round(buf["total_usdc"] * ratio, 2)
-            
-            # Min/Max boundaries
-            if capital < SHADOW_MIN_USDC:
-                capital = SHADOW_MIN_USDC
-                
-            if capital > AGG_MAX_TRADE_USDC:
-                capital = AGG_MAX_TRADE_USDC
-            
-            logger.info(f"🎯 [AGG TRIGGER] ¡Intención validada! Ejecutando señal en {market_id[:8]} por ${capital:.2f} USDC.")
+        # Garantizar mínimo operativo (evitar rechazos de exchange)
+        if capital < SHADOW_MIN_USDC:
+            capital = SHADOW_MIN_USDC
 
-            # Limpiar buffer tras disparar
-            del market_buffers[market_id]
+        logger.info(
+            f"🎯 [MIRROR] Whale: ${raw_usdc:.2f} -> Nosotros: ${capital:.2f} | "
+            f"{signal.get('market_name', 'Mercado')[:40]}"
+        )
 
-            # Inyectar el capital sobreescrito en la señal para que execute_copy_trade no recalcule
-            signal["_agg_capital_override_"] = capital
+        # Inyectar capital sobreescrito
+        signal["_agg_capital_override_"] = capital
 
-            # Registrar marca temporal para el rate limit
-            execs_timestamps.append(datetime.now(timezone.utc).timestamp())
+        # Registrar marca temporal
+        execs_timestamps.append(datetime.now(timezone.utc).timestamp())
 
-            # Ejecutar
-            position = await execute_copy_trade(signal)
-            logger.info(f"📋 Ejecución AGG: {position.get('trade_id', '?')} | Status: {position.get('status', 'failed')}")
+        # Ejecución inmediata
+        position = await execute_copy_trade(signal)
+        logger.info(f"📋 Mirror Execution: {position.get('trade_id', '?')} | Status: {position.get('status', 'failed')}")
+
 
 
